@@ -1,0 +1,29 @@
+[package]
+name = "android-emulator-manager"
+version = "0.5.0"
+edition = "2021"
+description = "Lightweight Windows control panel for Google's Android Emulator"
+license = "MIT"
+readme = "README.md"
+keywords = ["android", "emulator", "egui", "windows"]
+categories = ["gui", "development-tools"]
+
+[dependencies]
+# GUI. glow = OpenGL backend (smallest/lightest). Turn off everything we don't use.
+eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts"] }
+# Small blocking HTTP client for downloading the SDK tools.
+ureq = "2"
+# Unzip the downloaded SDK tools / Java runtime.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Embeds the app icon and version info into the .exe (only used when building on Windows).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+# Smallest possible .exe
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

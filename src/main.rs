@@ -1,0 +1,41 @@
+// Hide the console window in release builds.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod adb;
+mod app;
+mod devices;
+mod download;
+mod images;
+mod java;
+mod launcher;
+mod paths;
+mod runner;
+mod sdk;
+mod virt;
+
+/// One error type for everything that can fail (keeps the code simple).
+pub type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+fn main() -> eframe::Result<()> {
+    let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_icon(app_icon())
+            .with_inner_size([820.0, 640.0])
+            .with_min_inner_size([640.0, 480.0]),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "Android Emulator Manager",
+        options,
+        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
+    )
+}
+
+/// The 64x64 window/taskbar icon (raw RGBA bytes, so no image decoder is needed).
+fn app_icon() -> eframe::egui::IconData {
+    eframe::egui::IconData {
+        rgba: include_bytes!("../assets/icon-64.rgba").to_vec(),
+        width: 64,
+        height: 64,
+    }
+}
