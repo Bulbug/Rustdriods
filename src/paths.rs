@@ -27,3 +27,11 @@ pub fn screenshots_dir() -> PathBuf {
         None => home().join("screenshots"),
     }
 }
+
+/// Where files copied FROM the emulator are saved.
+pub fn pulled_dir() -> PathBuf {
+    match std::env::var_os("USERPROFILE") {
+        Some(u) => PathBuf::from(u).join("Downloads").join("AndroidEmulatorManager"),
+        None => home().join("pulled"),
+    }
+}

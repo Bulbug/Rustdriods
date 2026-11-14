@@ -5,11 +5,11 @@ use crate::runner::{self, Log};
 use crate::{java, paths, Res};
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ---------- presets ----------
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Preset {
     Lite,
     LowEnd,
@@ -57,13 +57,37 @@ impl Preset {
     }
 
     pub fn label(self) -> &'static str { self.spec().label }
+    pub fn ram_mb(self) -> u32 { self.spec().ram_mb }
     pub fn description(self) -> &'static str { self.spec().desc }
 
     /// Never ask for more cores than this PC has.
-    fn effective_cores(self) -> usize {
+    pub fn effective_cores(self) -> usize {
         let have = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
         self.spec().cores.min(have).max(1)
     }
+}
+
+/// Suggests the heaviest preset this PC can run comfortably (the lower of what its RAM and CPU allow).
+pub fn recommend(ram_mb: u64, cores: usize) -> Preset {
+    let by_ram = if ram_mb < 6656 {
+        Preset::Lite
+    } else if ram_mb < 10240 {
+        Preset::LowEnd
+    } else if ram_mb < 14336 {
+        Preset::Balanced
+    } else {
+        Preset::Gaming
+    };
+    let by_cpu = if cores < 4 {
+        Preset::Lite
+    } else if cores < 6 {
+        Preset::LowEnd
+    } else if cores < 8 {
+        Preset::Balanced
+    } else {
+        Preset::Gaming
+    };
+    by_ram.min(by_cpu)
 }
 
 // ---------- list ----------
@@ -75,6 +99,7 @@ pub struct DeviceInfo {
     pub ram: String,
     pub cores: String,
     pub screen: String,
+    pub snap_bytes: u64, // size of the saved quick-boot state
 }
 
 pub fn normalize_sysdir(s: &str) -> String {
@@ -108,6 +133,7 @@ pub fn list() -> Res<Vec<DeviceInfo>> {
             ram: get("hw.ramSize"),
             cores: get("hw.cpu.ncore"),
             screen: format!("{}x{}", get("hw.lcd.width"), get("hw.lcd.height")),
+            snap_bytes: dir_size(&avd_dir(&name).join("snapshots")),
             name,
         });
     }
@@ -167,6 +193,101 @@ pub fn delete(name: &str, log: &Log) -> Res<()> {
     }
     log("Deleted.".to_string());
     Ok(())
+}
+
+// ---------- manage an existing device ----------
+
+fn avd_dir(name: &str) -> PathBuf {
+    paths::avd_home().join(format!("{name}.avd"))
+}
+
+fn check_name(name: &str) -> Res<()> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err("Invalid device name.".into());
+    }
+    Ok(())
+}
+
+fn resource_updates(ram_mb: u32, cores: u32) -> Vec<(&'static str, String)> {
+    vec![("hw.ramSize", ram_mb.to_string()), ("hw.cpu.ncore", cores.to_string())]
+}
+
+/// Changes the RAM and CPU cores of an existing device.
+/// The saved quick-boot state is removed too, because it no longer matches the new hardware.
+pub fn set_resources(name: &str, ram_mb: u32, cores: u32, log: &Log) -> Res<()> {
+    check_name(name)?;
+    if !(512..=32768).contains(&ram_mb) {
+        return Err("RAM must be between 512 and 32768 MB.".into());
+    }
+    if !(1..=64).contains(&cores) {
+        return Err("CPU cores must be between 1 and 64.".into());
+    }
+    let cfg = avd_dir(name).join("config.ini");
+    if !cfg.exists() {
+        return Err(format!("Device \"{name}\" was not found.").into());
+    }
+    write_config(&cfg, &resource_updates(ram_mb, cores), &[])?;
+    let snaps = avd_dir(name).join("snapshots");
+    if snaps.exists() {
+        fs::remove_dir_all(&snaps)?;
+    }
+    log(format!("Saved \"{name}\": {ram_mb} MB RAM, {cores} cores."));
+    Ok(())
+}
+
+/// Deletes the saved quick-boot state of a device (frees disk space; next start is a full boot).
+pub fn clear_snapshots(name: &str, log: &Log) -> Res<()> {
+    check_name(name)?;
+    let dir = avd_dir(name).join("snapshots");
+    if !dir.exists() {
+        log("Nothing to clear.".to_string());
+        return Ok(());
+    }
+    let size = dir_size(&dir);
+    fs::remove_dir_all(&dir)?;
+    log(format!("Cleared the saved state of \"{name}\" (freed {}).", human_size(size)));
+    Ok(())
+}
+
+fn dir_size(dir: &Path) -> u64 {
+    let mut total = 0;
+    if let Ok(rd) = fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_dir() {
+                    total += dir_size(&entry.path());
+                } else {
+                    total += meta.len();
+                }
+            }
+        }
+    }
+    total
+}
+
+pub fn human_size(bytes: u64) -> String {
+    const MB: u64 = 1 << 20;
+    const GB: u64 = 1 << 30;
+    if bytes < MB {
+        "-".to_string()
+    } else if bytes < GB {
+        format!("{} MB", bytes / MB)
+    } else {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    }
+}
+
+/// "2048" and "2048MB" both give 2048.
+pub fn leading_number(raw: &str) -> Option<u32> {
+    let digits: String = raw.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+pub fn ram_label(raw: &str) -> String {
+    match leading_number(raw) {
+        Some(n) => format!("{n} MB"),
+        None => raw.to_string(),
+    }
 }
 
 // ---------- config.ini helpers ----------
@@ -255,6 +376,33 @@ mod tests {
         assert_eq!(c["hw.cpu.ncore"], "2");
         assert_eq!(c["image.sysdir.1"], "a/b/");
         assert!(!c.contains_key("skin.path"));
+    }
+
+    #[test]
+    fn suggests_a_preset_from_ram_and_cpu() {
+        assert!(recommend(4096, 2) == Preset::Lite);
+        assert!(recommend(7800, 8) == Preset::LowEnd); // an 8 GB PC
+        assert!(recommend(16000, 4) == Preset::LowEnd); // lots of RAM but only 4 cores
+        assert!(recommend(12000, 8) == Preset::Balanced);
+        assert!(recommend(32000, 16) == Preset::Gaming);
+    }
+
+    #[test]
+    fn reads_numbers_and_sizes() {
+        assert_eq!(leading_number("2048"), Some(2048));
+        assert_eq!(leading_number("2048MB"), Some(2048));
+        assert_eq!(leading_number("?"), None);
+        assert_eq!(human_size(100), "-");
+        assert_eq!(human_size(300 << 20), "300 MB");
+        assert_eq!(human_size(3 << 30), "3.0 GB");
+        assert_eq!(ram_label("1536"), "1536 MB");
+    }
+
+    #[test]
+    fn resource_updates_have_both_keys() {
+        let u = resource_updates(3072, 4);
+        assert_eq!(u[0], ("hw.ramSize", "3072".to_string()));
+        assert_eq!(u[1], ("hw.cpu.ncore", "4".to_string()));
     }
 
     #[test]

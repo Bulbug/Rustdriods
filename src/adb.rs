@@ -5,9 +5,10 @@ use crate::{paths, Res};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn adb(args: &[&str]) -> Command {
     let mut c = Command::new(paths::adb());
@@ -126,6 +127,84 @@ pub fn screenshot() -> Res<PathBuf> {
     Ok(path)
 }
 
+/// Removes spaces and the quotes Windows adds with "Copy as path".
+pub fn clean_path(s: &str) -> String {
+    s.trim().trim_matches('"').trim().to_string()
+}
+
+/// Runs one command inside the emulator (`adb shell ...`) and prints its output to the log.
+/// Commands that never end (like `logcat` without -d) are stopped after 30 seconds.
+pub fn shell(command: &str, log: &Log) -> Res<()> {
+    let finished = Arc::new(AtomicBool::new(false));
+    let pid = Arc::new(AtomicU32::new(0));
+
+    // Watchdog: gives up on a command that is still running after 30 s.
+    {
+        let (finished, pid, log) = (Arc::clone(&finished), Arc::clone(&pid), Arc::clone(log));
+        thread::spawn(move || {
+            for _ in 0..60 {
+                thread::sleep(Duration::from_millis(500));
+                if finished.load(Ordering::SeqCst) {
+                    return;
+                }
+            }
+            log("Command stopped after 30 s. (Tip: use `logcat -d -t 100` to print the log and exit.)".to_string());
+            crate::launcher::kill_tree(pid.load(Ordering::SeqCst));
+        });
+    }
+
+    let args: Vec<String> = vec!["-e".into(), "shell".into(), command.into()];
+    let pid2 = Arc::clone(&pid);
+    let result = runner::run_notify(paths::adb(), &args, &[], None, log, &move |p| {
+        pid2.store(p, Ordering::SeqCst)
+    });
+    finished.store(true, Ordering::SeqCst);
+
+    let code = result?;
+    if code != 0 {
+        log(format!("(command finished with exit code {code})"));
+    }
+    Ok(())
+}
+
+/// Copies a file or folder from the PC into the emulator.
+pub fn push(src: &Path, dest: &str, log: &Log) -> Res<()> {
+    if !src.exists() {
+        return Err(format!("File not found: {}", src.display()).into());
+    }
+    log(format!("Copying {} to the emulator ({dest}) ...", src.display()));
+    let args: Vec<String> = vec![
+        "-e".into(),
+        "push".into(),
+        src.to_string_lossy().to_string(),
+        dest.to_string(),
+    ];
+    let code = runner::run(paths::adb(), &args, &[], None, log)?;
+    if code != 0 {
+        return Err("Copy failed (see the messages above).".into());
+    }
+    log("Copied to the emulator.".to_string());
+    Ok(())
+}
+
+/// Copies a file or folder from the emulator into `dest_dir` on the PC.
+pub fn pull(src: &str, dest_dir: &Path, log: &Log) -> Res<()> {
+    fs::create_dir_all(dest_dir)?;
+    log(format!("Copying {src} from the emulator ..."));
+    let args: Vec<String> = vec![
+        "-e".into(),
+        "pull".into(),
+        src.to_string(),
+        dest_dir.to_string_lossy().to_string(),
+    ];
+    let code = runner::run(paths::adb(), &args, &[], None, log)?;
+    if code != 0 {
+        return Err("Copy failed (see the messages above).".into());
+    }
+    log(format!("Saved in {}", dest_dir.display()));
+    Ok(())
+}
+
 /// Opens a folder in Windows Explorer.
 pub fn open_folder(dir: &Path) {
     let _ = fs::create_dir_all(dir);
@@ -134,7 +213,13 @@ pub fn open_folder(dir: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_packages;
+    use super::{clean_path, parse_packages};
+
+    #[test]
+    fn cleans_pasted_paths() {
+        assert_eq!(clean_path("  \"C:\\a b\\x.apk\" "), "C:\\a b\\x.apk");
+        assert_eq!(clean_path("/sdcard/Download/"), "/sdcard/Download/");
+    }
 
     #[test]
     fn parses_pm_output() {

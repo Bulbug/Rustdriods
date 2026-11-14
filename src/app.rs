@@ -36,11 +36,13 @@ enum Action {
     DeleteDevice(String),
     StopAndQuit,
     UninstallApp(String),
+    ClearState(String),
 }
 
 struct EnvStatus {
     virt: (bool, String),
     java: bool,
+    ram_mb: Option<u64>,
 }
 
 struct Snapshot {
@@ -91,6 +93,30 @@ impl Reporter {
     }
 }
 
+/// What was clicked on the ADB Tools tab this frame.
+#[derive(Default)]
+struct ToolClicks {
+    install: bool,
+    shot: bool,
+    open_shots: bool,
+    uninstall: bool,
+    refresh: bool,
+    system_changed: bool,
+    run_shell: bool,
+    push: bool,
+    pull: bool,
+    open_pulled: bool,
+}
+
+const SHELL_EXAMPLES: [(&str, &str); 6] = [
+    ("Android version", "getprop ro.build.version.release"),
+    ("Battery", "dumpsys battery"),
+    ("Free space", "df -h /data"),
+    ("Last 100 log lines", "logcat -d -t 100"),
+    ("Press Home", "input keyevent 3"),
+    ("Press Back", "input keyevent 4"),
+];
+
 pub struct App {
     rep: Reporter,
     rx: mpsc::Receiver<Msg>,
@@ -122,6 +148,18 @@ pub struct App {
     app_filter: String,
     show_system: bool,
     apk_path: String,
+    shell_cmd: String,
+    push_src: String,
+    push_dest: String,
+    pull_src: String,
+
+    pc_ram_mb: Option<u64>,
+    pc_cores: usize,
+    preset_auto_set: bool,
+    edit_for: Option<String>,
+    edit_ram: u32,
+    edit_cores: u32,
+    edit_preset: Preset,
 
     running: Option<Running>,
     opts: LaunchOptions,
@@ -162,6 +200,17 @@ impl App {
             app_filter: String::new(),
             show_system: false,
             apk_path: String::new(),
+            shell_cmd: String::new(),
+            push_src: String::new(),
+            push_dest: "/sdcard/Download/".to_string(),
+            pull_src: "/sdcard/Download/".to_string(),
+            pc_ram_mb: None,
+            pc_cores: thread::available_parallelism().map(|n| n.get()).unwrap_or(2),
+            preset_auto_set: false,
+            edit_for: None,
+            edit_ram: 2048,
+            edit_cores: 2,
+            edit_preset: Preset::Lite,
             running: None,
             opts: LaunchOptions::default(),
             quit_when_stopped: false,
@@ -181,7 +230,12 @@ impl App {
         let imgs = self.images.clone();
         thread::spawn(move || {
             let env = if full {
-                Some(EnvStatus { virt: virt::check(), java: java::java_home().is_some() })
+                let v = virt::check();
+                Some(EnvStatus {
+                    virt: (v.ok, v.message),
+                    java: java::java_home().is_some(),
+                    ram_mb: v.ram_mb,
+                })
             } else {
                 None
             };
@@ -241,6 +295,9 @@ impl App {
             Action::StopAndQuit => {
                 self.quit_when_stopped = true;
                 self.on_stop_device();
+            }
+            Action::ClearState(name) => {
+                self.spawn_job(false, move |rep| devices::clear_snapshots(&name, &rep.logger()));
             }
             Action::UninstallApp(pkg) => {
                 let show_system = self.show_system;
@@ -313,6 +370,13 @@ impl App {
         if let Some(env) = s.env {
             self.virt = env.virt;
             self.java_ok = env.java;
+            self.pc_ram_mb = env.ram_mb;
+            if !self.preset_auto_set {
+                if let Some(ram) = env.ram_mb {
+                    self.new_preset = devices::recommend(ram, self.pc_cores);
+                    self.preset_auto_set = true;
+                }
+            }
         }
         self.tools_ok = s.tools;
         self.adb_ok = s.adb;
@@ -456,6 +520,79 @@ impl App {
             return;
         };
         self.confirm = Some((format!("Uninstall {pkg}?\nIts data will be erased."), Action::UninstallApp(pkg)));
+    }
+
+    fn on_save_resources(&mut self) {
+        let Some(i) = self.sel_device else { return };
+        let name = self.devices[i].name.clone();
+        if self.running.as_ref().map_or(false, |r| r.name == name) {
+            self.info = Some("Stop this device before changing it.".to_string());
+            return;
+        }
+        let (ram, cores) = (self.edit_ram, self.edit_cores);
+        self.spawn_job(false, move |rep| devices::set_resources(&name, ram, cores, &rep.logger()));
+    }
+
+    fn on_clear_state(&mut self) {
+        let Some(i) = self.sel_device else { return };
+        let name = self.devices[i].name.clone();
+        if self.running.as_ref().map_or(false, |r| r.name == name) {
+            self.info = Some("Stop this device before clearing its saved state.".to_string());
+            return;
+        }
+        self.confirm = Some((
+            format!("Clear the saved state of \"{name}\"?\nThe next start will be a full (slower) boot."),
+            Action::ClearState(name),
+        ));
+    }
+
+    fn on_run_shell(&mut self) {
+        let cmd = self.shell_cmd.trim().to_string();
+        if cmd.is_empty() {
+            self.info = Some("Type a command first (or click one of the examples).".to_string());
+            return;
+        }
+        if self.busy || !self.adb_ok {
+            return;
+        }
+        self.spawn_job(false, move |rep| {
+            adb::require_connected()?;
+            let log = rep.logger();
+            log(format!("$ {cmd}"));
+            adb::shell(&cmd, &log)
+        });
+    }
+
+    fn on_push(&mut self) {
+        let src = adb::clean_path(&self.push_src);
+        let dest = adb::clean_path(&self.push_dest);
+        if src.is_empty() {
+            self.info = Some("Drop a file here, or paste the file's path first.".to_string());
+            return;
+        }
+        let dest = if dest.is_empty() { "/sdcard/Download/".to_string() } else { dest };
+        if self.busy || !self.adb_ok {
+            return;
+        }
+        self.spawn_job(false, move |rep| {
+            adb::require_connected()?;
+            adb::push(&PathBuf::from(src), &dest, &rep.logger())
+        });
+    }
+
+    fn on_pull(&mut self) {
+        let src = adb::clean_path(&self.pull_src);
+        if src.is_empty() {
+            self.info = Some("Type the path of the file inside the emulator, e.g. /sdcard/Download/file.txt".to_string());
+            return;
+        }
+        if self.busy || !self.adb_ok {
+            return;
+        }
+        self.spawn_job(false, move |rep| {
+            adb::require_connected()?;
+            adb::pull(&src, &paths::pulled_dir(), &rep.logger())
+        });
     }
 
     fn on_start_device(&mut self) {
@@ -636,8 +773,8 @@ impl App {
             ui.label("No devices yet. Create one below.");
         } else {
             let mut sel = self.sel_device;
-            egui::Grid::new("devices").striped(true).num_columns(6).spacing([24.0, 6.0]).show(ui, |ui| {
-                for h in ["Name", "Android", "RAM", "Cores", "Screen", "Status"] {
+            egui::Grid::new("devices").striped(true).num_columns(7).spacing([24.0, 6.0]).show(ui, |ui| {
+                for h in ["Name", "Android", "RAM", "Cores", "Screen", "Saved state", "Status"] {
                     ui.strong(h);
                 }
                 ui.end_row();
@@ -646,9 +783,10 @@ impl App {
                         sel = Some(i);
                     }
                     ui.label(friendly(&self.images, &d.sysdir));
-                    ui.label(format!("{} MB", d.ram));
+                    ui.label(devices::ram_label(&d.ram));
                     ui.label(&d.cores);
                     ui.label(&d.screen);
+                    ui.label(devices::human_size(d.snap_bytes));
                     if self.running.as_ref().map_or(false, |r| r.name == d.name) {
                         ui.colored_label(GREEN, "Running");
                     } else {
@@ -694,9 +832,75 @@ impl App {
             self.on_stop_device();
         }
 
+        // ----- manage the selected device: RAM, cores, saved state -----
+        let selected: Option<DeviceInfo> = self.sel_device.and_then(|i| self.devices.get(i).cloned());
+        let sel_name = selected.as_ref().map(|d| d.name.clone());
+        if sel_name != self.edit_for {
+            self.edit_for = sel_name;
+            if let Some(d) = &selected {
+                self.edit_ram = devices::leading_number(&d.ram).unwrap_or(2048);
+                self.edit_cores = devices::leading_number(&d.cores).unwrap_or(2);
+            }
+        }
+        let max_ram = self.pc_ram_mb.map_or(8192, |r| ((r * 3 / 4) as u32).clamp(2048, 16384));
+        let max_cores = (self.pc_cores as u32).clamp(1, 8);
+        let (mut save, mut fill, mut clear) = (false, false, false);
+        egui::CollapsingHeader::new("Manage selected device (RAM, CPU, saved state)").show(ui, |ui| {
+            let Some(d) = &selected else {
+                ui.label("Select a device in the table first.");
+                return;
+            };
+            let is_running = self.running.as_ref().map_or(false, |r| r.name == d.name);
+            if is_running {
+                ui.colored_label(RED, "Stop this device first to change it.");
+            }
+            ui.add_enabled_ui(!is_running && !self.busy, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("RAM:");
+                    ui.add(egui::Slider::new(&mut self.edit_ram, 1024..=max_ram).step_by(256.0).suffix(" MB"));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("CPU cores:");
+                    ui.add(egui::Slider::new(&mut self.edit_cores, 1..=max_cores));
+                });
+                if let Some(pc) = self.pc_ram_mb {
+                    if self.edit_ram as u64 * 2 > pc {
+                        ui.colored_label(RED, "That is more than half of your PC's RAM. Windows and other programs may slow down.");
+                    }
+                }
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("edit_preset")
+                        .selected_text(self.edit_preset.label())
+                        .show_ui(ui, |ui| {
+                            for p in Preset::ALL {
+                                ui.selectable_value(&mut self.edit_preset, p, p.label());
+                            }
+                        });
+                    fill = ui.button("Fill from preset").clicked();
+                    save = ui.button("Save changes").clicked();
+                });
+                ui.weak("Saving also clears the saved state, so the next start is a full boot.");
+                ui.horizontal(|ui| {
+                    ui.label(format!("Saved state (quick boot): {}", devices::human_size(d.snap_bytes)));
+                    clear = ui.add_enabled(d.snap_bytes > 0, egui::Button::new("Clear saved state")).clicked();
+                });
+            });
+        });
+        if fill {
+            self.edit_ram = self.edit_preset.ram_mb();
+            self.edit_cores = self.edit_preset.effective_cores() as u32;
+        }
+        if save {
+            self.on_save_resources();
+        }
+        if clear {
+            self.on_clear_state();
+        }
+
         ui.add_space(8.0);
         ui.separator();
         ui.strong("New device");
+        let rec = self.pc_ram_mb.map(|r| devices::recommend(r, self.pc_cores));
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.new_name).hint_text("Device name").desired_width(150.0));
 
@@ -716,11 +920,24 @@ impl App {
                 .selected_text(self.new_preset.label())
                 .show_ui(ui, |ui| {
                     for p in Preset::ALL {
-                        ui.selectable_value(&mut self.new_preset, p, p.label());
+                        let text = if rec == Some(p) {
+                            format!("{} (suggested)", p.label())
+                        } else {
+                            p.label().to_string()
+                        };
+                        ui.selectable_value(&mut self.new_preset, p, text);
                     }
                 });
         });
         ui.label(self.new_preset.description());
+        if let Some(ram) = self.pc_ram_mb {
+            ui.weak(format!(
+                "Your PC: {:.0} GB RAM, {} CPU threads. Suggested preset: {}.",
+                ram as f64 / 1024.0,
+                self.pc_cores,
+                devices::recommend(ram, self.pc_cores).label()
+            ));
+        }
         ui.add_space(8.0);
 
         let (mut create, mut delete, mut refresh) = (false, false, false);
@@ -762,68 +979,143 @@ impl App {
         ui.add_space(6.0);
 
         let can_use = !self.busy && self.adb_ok;
-        let (mut install, mut shot, mut open_dir, mut refresh) = (false, false, false, false);
-
-        ui.strong("Install an app");
-        ui.label("Drag an .apk file onto this window, or paste its path:");
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.apk_path).hint_text("C:\\path\\to\\app.apk").desired_width(360.0));
-            install = ui.add_enabled(can_use, egui::Button::new("Install")).clicked();
-        });
-
-        ui.add_space(8.0);
-        ui.separator();
-        ui.strong("Screenshot");
-        ui.horizontal(|ui| {
-            shot = ui.add_enabled(can_use, egui::Button::new("Take screenshot")).clicked();
-            open_dir = ui.button("Open screenshots folder").clicked();
-        });
-
-        ui.add_space(8.0);
-        ui.separator();
-        ui.strong("Installed apps");
-        let mut system_changed = false;
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.app_filter).hint_text("Filter").desired_width(200.0));
-            system_changed = ui.checkbox(&mut self.show_system, "Show system apps").changed();
-            refresh = ui.add_enabled(!self.busy, egui::Button::new("Refresh")).clicked();
-        });
+        let mut c = ToolClicks::default();
 
         let filter = self.app_filter.to_lowercase();
         let shown: Vec<&String> = self.apps.iter().filter(|a| a.to_lowercase().contains(&filter)).collect();
-        egui::ScrollArea::vertical().max_height(220.0).auto_shrink([false, true]).show(ui, |ui| {
-            if shown.is_empty() {
-                ui.label(if self.adb_connected { "No apps to show." } else { "-" });
-            }
-            for pkg in &shown {
-                let selected = self.sel_app.as_deref() == Some(pkg.as_str());
-                if ui.selectable_label(selected, pkg.as_str()).clicked() {
-                    self.sel_app = Some((*pkg).clone());
-                }
-            }
-        });
-        ui.add_space(6.0);
-        let uninstall = ui.add_enabled(can_use, egui::Button::new("Uninstall selected")).clicked();
 
-        if install {
-            let path = self.apk_path.trim().trim_matches('"').to_string();
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            // ----- install -----
+            ui.strong("Install an app");
+            ui.label("Drag an .apk file onto this window, or paste its path:");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.apk_path)
+                        .hint_text(r"C:\path\to\app.apk")
+                        .desired_width(360.0),
+                );
+                c.install = ui.add_enabled(can_use, egui::Button::new("Install")).clicked();
+            });
+
+            // ----- screenshot -----
+            ui.add_space(8.0);
+            ui.separator();
+            ui.strong("Screenshot");
+            ui.horizontal(|ui| {
+                c.shot = ui.add_enabled(can_use, egui::Button::new("Take screenshot")).clicked();
+                c.open_shots = ui.button("Open screenshots folder").clicked();
+            });
+
+            // ----- installed apps -----
+            ui.add_space(8.0);
+            ui.separator();
+            ui.strong("Installed apps");
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.app_filter).hint_text("Filter").desired_width(200.0));
+                c.system_changed = ui.checkbox(&mut self.show_system, "Show system apps").changed();
+                c.refresh = ui.add_enabled(!self.busy, egui::Button::new("Refresh")).clicked();
+            });
+            egui::ScrollArea::vertical()
+                .id_salt("apps_list")
+                .max_height(180.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    if shown.is_empty() {
+                        ui.label(if self.adb_connected { "No apps to show." } else { "-" });
+                    }
+                    for pkg in &shown {
+                        let selected = self.sel_app.as_deref() == Some(pkg.as_str());
+                        if ui.selectable_label(selected, pkg.as_str()).clicked() {
+                            self.sel_app = Some((*pkg).clone());
+                        }
+                    }
+                });
+            c.uninstall = ui.add_enabled(can_use, egui::Button::new("Uninstall selected")).clicked();
+
+            // ----- shell -----
+            ui.add_space(8.0);
+            ui.separator();
+            ui.strong("Run a command in the emulator (adb shell)");
+            ui.horizontal(|ui| {
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.shell_cmd)
+                        .hint_text("e.g. getprop ro.build.version.release")
+                        .desired_width(420.0),
+                );
+                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let clicked = ui.add_enabled(can_use, egui::Button::new("Run")).clicked();
+                c.run_shell = clicked || (enter && can_use);
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Examples:");
+                for (label, cmd) in SHELL_EXAMPLES {
+                    if ui.small_button(label).clicked() {
+                        self.shell_cmd = cmd.to_string();
+                    }
+                }
+            });
+            ui.weak("The output appears in the log below. Commands run on the emulator only, never on your PC.");
+
+            // ----- files -----
+            ui.add_space(8.0);
+            ui.separator();
+            ui.strong("Copy files");
+            ui.label("PC to emulator (you can also drag any file onto this window):");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.push_src)
+                        .hint_text(r"C:\path\to\file")
+                        .desired_width(260.0),
+                );
+                ui.label("to");
+                ui.add(egui::TextEdit::singleline(&mut self.push_dest).desired_width(160.0));
+                c.push = ui.add_enabled(can_use, egui::Button::new("Copy to emulator")).clicked();
+            });
+            ui.label("Emulator to PC:");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.pull_src)
+                        .hint_text("/sdcard/Download/file.txt")
+                        .desired_width(260.0),
+                );
+                c.pull = ui.add_enabled(can_use, egui::Button::new("Copy to PC")).clicked();
+                c.open_pulled = ui.button("Open folder").clicked();
+            });
+            ui.weak("Files copied to the PC go to Downloads\\AndroidEmulatorManager.");
+            ui.add_space(8.0);
+        });
+
+        if c.install {
+            let path = adb::clean_path(&self.apk_path);
             if path.is_empty() {
                 self.info = Some("Drop an .apk file here, or paste its path first.".to_string());
             } else {
                 self.on_install_apk(PathBuf::from(path));
             }
         }
-        if shot {
+        if c.shot {
             self.on_screenshot();
         }
-        if open_dir {
+        if c.open_shots {
             adb::open_folder(&paths::screenshots_dir());
         }
-        if uninstall {
+        if c.uninstall {
             self.on_uninstall_app();
         }
-        if refresh || system_changed {
+        if c.refresh || c.system_changed {
             self.adb_refresh();
+        }
+        if c.run_shell {
+            self.on_run_shell();
+        }
+        if c.push {
+            self.on_push();
+        }
+        if c.pull {
+            self.on_pull();
+        }
+        if c.open_pulled {
+            adb::open_folder(&paths::pulled_dir());
         }
     }
 
@@ -940,7 +1232,18 @@ impl eframe::App for App {
         // Drag & drop an .apk anywhere on the window to install it.
         let dropped: Vec<egui::DroppedFile> = ctx.input(|i| i.raw.dropped_files.clone());
         if let Some(path) = dropped.into_iter().find_map(|f| f.path) {
-            self.on_install_apk(path);
+            let is_apk = path.extension().map_or(false, |e| e.eq_ignore_ascii_case("apk"));
+            if is_apk {
+                self.on_install_apk(path);
+            } else {
+                self.push_src = path.to_string_lossy().to_string();
+                self.tab = Tab::Tools;
+                self.adb_refresh();
+                self.push_log(format!(
+                    "Ready to copy: {} (press \"Copy to emulator\" on the ADB Tools tab)",
+                    path.display()
+                ));
+            }
         }
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
             let rect = ctx.screen_rect();
@@ -949,7 +1252,7 @@ impl eframe::App for App {
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
-                "Drop an .apk here to install it",
+                "Drop an .apk to install it, or any file to copy it to the emulator",
                 egui::FontId::proportional(24.0),
                 egui::Color32::WHITE,
             );

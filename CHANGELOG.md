@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0
+- ADB Tools: run `adb shell` commands (with example buttons), copy files to and from the emulator, drag any file onto the window to copy it
+- The Devices tab suggests a preset from your PC's RAM and CPU
+- Edit an existing device's RAM and CPU cores
+- See how much disk space each device's saved state uses, and clear it
+
 ## 0.5.0
 - Packaging: app icon (exe, window, taskbar), version info, MIT license
 - Automatic Windows builds and GitHub releases (GitHub Actions)

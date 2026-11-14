@@ -15,8 +15,8 @@ launches them with lean settings, and installs apps by drag and drop.
 ## Features
 - **Setup:** checks virtualization, then downloads the Android SDK tools (and a small Java runtime if your PC has no Java 17+).
 - **System Images:** pick from 11 recommended Android 11-15 images (Google APIs, Google Play, or the lightest AOSP).
-- **Devices:** create virtual devices from presets (Lite, Low-end PC, Balanced, Gaming), start and stop them, tweak launch options.
-- **ADB Tools:** drag an `.apk` onto the window to install it, take screenshots, list and uninstall apps.
+- **Devices:** create virtual devices from presets (Lite, Low-end PC, Balanced, Gaming). The app suggests one for your PC. Start and stop devices, tweak launch options, change RAM and CPU later, and clear saved state to free disk space.
+- **ADB Tools:** drag an `.apk` onto the window to install it, take screenshots, list and uninstall apps, run `adb shell` commands, and copy files to and from the emulator.
 
 <!-- TODO: add screenshots here, e.g. docs/screenshots/devices.png -->
 
@@ -86,9 +86,9 @@ src/runner.rs      runs programs and streams their output
 - [x] Phase 4: launcher (lean launch flags)
 - [x] Phase 5: ADB tools
 - [x] Phase 6a: packaging (icon, CI, releases)
+- [x] ADB shell and file copy
+- [x] Smarter performance profiles (suggested preset, edit device, saved-state cleanup)
 - [ ] Keymapping for games
-- [ ] More performance profiles
-- [ ] ADB shell and file push/pull
 
 ## Legal
 This project is not affiliated with or endorsed by Google. Android is a trademark of Google LLC.
