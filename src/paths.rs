@@ -35,3 +35,6 @@ pub fn pulled_dir() -> PathBuf {
         None => home().join("pulled"),
     }
 }
+
+/// Saved keymap profiles (one small text file per game).
+pub fn keymaps_dir() -> PathBuf { home().join("keymaps") }

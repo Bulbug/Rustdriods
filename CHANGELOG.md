@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.1
+- GitHub Actions: every build now keeps the exe as a downloadable artifact (CI and Release)
+- CI builds before it runs the tests, so a failing test no longer blocks the exe
+- Release can also be started by hand ("Run workflow"), without making a tag
+
+## 0.7.0
+- Keymap tab (experimental): map keyboard keys to taps on the game screen
+  - capture the screen, click a spot, press a key; one profile per game, saved as a small text file
+  - works only while the Android Emulator window is in front; F10 pauses and resumes
+  - taps use `adb input tap` (about 0.1-0.3 s delay, one spot at a time)
+
 ## 0.6.0
 - ADB Tools: run `adb shell` commands (with example buttons), copy files to and from the emulator, drag any file onto the window to copy it
 - The Devices tab suggests a preset from your PC's RAM and CPU

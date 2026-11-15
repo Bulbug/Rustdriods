@@ -1,11 +1,14 @@
 //! The window. Three tabs (Setup, System Images, Devices) and one shared log panel.
 //! Heavy work runs on background threads and reports back through a channel.
 use crate::adb;
+use crate::keymap::{self, Profile};
+use crate::{hook, inject};
 use crate::devices::{self, DeviceInfo, Preset};
 use crate::images::{self, SystemImage};
 use crate::launcher::{self, Gpu, LaunchOptions};
 use crate::{java, paths, sdk, virt, Res};
 use eframe::egui;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
@@ -14,6 +17,7 @@ use std::time::Duration;
 
 const GREEN: egui::Color32 = egui::Color32::from_rgb(26, 127, 55);
 const RED: egui::Color32 = egui::Color32::from_rgb(198, 40, 40);
+const ORANGE: egui::Color32 = egui::Color32::from_rgb(214, 128, 0);
 
 const SETUP_TEXT: &str = "Setting up the Android SDK means you accept Google's Android SDK License Agreement:\n\
 https://developer.android.com/studio/terms\n\n\
@@ -26,6 +30,7 @@ enum Tab {
     Images,
     Devices,
     Tools,
+    Keymap,
 }
 
 /// What the user confirmed in a dialog.
@@ -37,6 +42,7 @@ enum Action {
     StopAndQuit,
     UninstallApp(String),
     ClearState(String),
+    DeleteProfile(String),
 }
 
 struct EnvStatus {
@@ -62,6 +68,9 @@ enum Msg {
     Finished { full: bool },
     EmuExited { code: i32 },
     Adb { connected: bool, apps: Vec<String> },
+    Screen(adb::Screen),
+    MapReady(Option<MapRuntime>),
+    MapToggle(bool),
 }
 
 /// The emulator that is currently running (only one at a time).
@@ -91,6 +100,28 @@ impl Reporter {
     fn progress(&self, p: Option<f32>) {
         self.send(Msg::Progress(p));
     }
+}
+
+/// Everything that runs while keymapping is on. Dropping it turns mapping off.
+struct MapRuntime {
+    _hook: hook::HookHandle,
+    _inj: inject::Injector,
+}
+
+/// What was clicked on the Keymap tab this frame.
+#[derive(Default)]
+struct KmClicks {
+    select: Option<String>,
+    create: bool,
+    delete: bool,
+    capture: bool,
+    toggle: bool,
+    pause: bool,
+    refresh: bool,
+    clicked_at: Option<(f32, f32)>,
+    remove: Option<usize>,
+    test: Option<usize>,
+    save: bool,
 }
 
 /// What was clicked on the ADB Tools tab this frame.
@@ -161,6 +192,16 @@ pub struct App {
     edit_cores: u32,
     edit_preset: Preset,
 
+    km_profiles: Vec<String>,
+    km: Option<Profile>,
+    km_new_name: String,
+    km_tex: Option<egui::TextureHandle>,
+    km_dev_size: Option<(u32, u32)>,
+    km_pending: Option<(f32, f32)>,
+    km_runtime: Option<MapRuntime>,
+    km_active: bool,
+    km_starting: bool,
+
     running: Option<Running>,
     opts: LaunchOptions,
     quit_when_stopped: bool,
@@ -211,6 +252,15 @@ impl App {
             edit_ram: 2048,
             edit_cores: 2,
             edit_preset: Preset::Lite,
+            km_profiles: keymap::list_profiles(),
+            km: None,
+            km_new_name: String::new(),
+            km_tex: None,
+            km_dev_size: None,
+            km_pending: None,
+            km_runtime: None,
+            km_active: false,
+            km_starting: false,
             running: None,
             opts: LaunchOptions::default(),
             quit_when_stopped: false,
@@ -296,6 +346,15 @@ impl App {
                 self.quit_when_stopped = true;
                 self.on_stop_device();
             }
+            Action::DeleteProfile(name) => {
+                if let Err(e) = keymap::delete(&name) {
+                    self.push_log(format!("ERROR: {e}"));
+                }
+                self.km_profiles = keymap::list_profiles();
+                if self.km.as_ref().map_or(false, |p| p.name == name) {
+                    self.km = None;
+                }
+            }
             Action::ClearState(name) => {
                 self.spawn_job(false, move |rep| devices::clear_snapshots(&name, &rep.logger()));
             }
@@ -334,7 +393,29 @@ impl App {
                         }
                     }
                 }
+                Msg::Screen(s) => {
+                    let img = egui::ColorImage::from_rgba_unmultiplied([s.sw, s.sh], &s.rgba);
+                    self.km_tex = Some(self.rep.ctx.load_texture("device_screen", img, egui::TextureOptions::LINEAR));
+                    self.km_dev_size = Some((s.w, s.h));
+                    let landscape = s.w > s.h;
+                    if let Some(p) = self.km.as_mut() {
+                        if p.binds.is_empty() {
+                            p.landscape = landscape;
+                        } else if p.landscape != landscape {
+                            self.push_log("Warning: the screen is rotated differently from when this profile was made.".to_string());
+                        }
+                    }
+                    self.push_log(format!("Captured the screen ({}x{}). Click where a button is, then press a key.", s.w, s.h));
+                }
+                Msg::MapReady(rt) => {
+                    self.km_active = rt.is_some();
+                    self.km_runtime = rt;
+                    self.km_starting = false;
+                }
+                Msg::MapToggle(on) => self.km_active = on,
                 Msg::EmuExited { code } => {
+                    self.km_runtime = None; // the emulator is gone, so mapping stops too
+                    self.km_active = false;
                     self.running = None;
                     self.adb_connected = false;
                     self.apps.clear();
@@ -544,6 +625,122 @@ impl App {
             format!("Clear the saved state of \"{name}\"?\nThe next start will be a full (slower) boot."),
             Action::ClearState(name),
         ));
+    }
+
+    // ---------- keymap ----------
+
+    fn km_save(&mut self) {
+        let res = self.km.as_ref().map(keymap::save);
+        if let Some(Err(e)) = res {
+            self.push_log(format!("ERROR: {e}"));
+        }
+    }
+
+    fn km_select(&mut self, name: &str) {
+        match keymap::load(name) {
+            Ok(p) => self.km = Some(p),
+            Err(e) => self.push_log(format!("ERROR: {e}")),
+        }
+    }
+
+    fn km_create(&mut self) {
+        let name = self.km_new_name.trim().to_string();
+        if !keymap::valid_name(&name) {
+            self.info = Some("Use a short name with letters, numbers, spaces, - _ .".to_string());
+            return;
+        }
+        self.km_new_name.clear();
+        if self.km_profiles.contains(&name) {
+            self.km_select(&name);
+            return;
+        }
+        let p = Profile {
+            name,
+            landscape: self.km_dev_size.map_or(false, |(w, h)| w > h),
+            binds: Vec::new(),
+        };
+        if let Err(e) = keymap::save(&p) {
+            self.push_log(format!("ERROR: {e}"));
+            return;
+        }
+        self.km = Some(p);
+        self.km_profiles = keymap::list_profiles();
+    }
+
+    fn km_capture(&mut self) {
+        self.spawn_job(false, |rep| {
+            adb::require_connected()?;
+            let screen = adb::capture_small(960)?;
+            rep.send(Msg::Screen(screen));
+            Ok(())
+        });
+    }
+
+    fn km_test(&mut self, i: usize) {
+        let (Some(p), Some(size)) = (&self.km, self.km_dev_size) else { return };
+        let Some(b) = p.binds.get(i) else { return };
+        let (x, y) = inject::to_pixels(b.x, b.y, size);
+        let key = b.key.clone();
+        self.spawn_job(false, move |rep| {
+            adb::require_connected()?;
+            adb::tap(x, y)?;
+            rep.logger()(format!("Tapped ({x}, {y}) for {key}."));
+            Ok(())
+        });
+    }
+
+    /// Turns mapping on or off.
+    fn km_toggle(&mut self) {
+        if self.km_runtime.is_some() {
+            self.km_runtime = None; // dropping it removes the keyboard hook and stops the injector
+            self.km_active = false;
+            self.push_log("Keymapping is off.".to_string());
+            return;
+        }
+        let Some(p) = &self.km else { return };
+        let mut binds: HashMap<u32, (f32, f32)> = HashMap::new();
+        for b in &p.binds {
+            if let Some(vk) = keymap::vk_for_label(&b.key) {
+                binds.insert(vk, (b.x, b.y));
+            }
+        }
+        if binds.is_empty() {
+            self.info = Some("This profile has no key bindings yet.".to_string());
+            return;
+        }
+        let landscape = p.landscape;
+        self.km_starting = true;
+
+        let rep = self.rep.clone();
+        thread::spawn(move || {
+            let result = (|| -> Result<(MapRuntime, (u32, u32)), String> {
+                adb::require_connected().map_err(|e| e.to_string())?;
+                let (w, h) = adb::screen_size().map_err(|e| e.to_string())?;
+                // The profile was made for one orientation; use the screen size in that orientation.
+                let size = if landscape { (w.max(h), w.min(h)) } else { (w.min(h), w.max(h)) };
+                let inj = inject::start(size);
+                let rep2 = rep.clone();
+                let hook = hook::start(
+                    binds,
+                    inj.tx.clone(),
+                    Box::new(move |on| rep2.send(Msg::MapToggle(on))),
+                )?;
+                Ok((MapRuntime { _hook: hook, _inj: inj }, size))
+            })();
+            match result {
+                Ok((rt, size)) => {
+                    rep.send(Msg::Log(format!(
+                        "Keymapping is ON ({}x{} screen). Click into the emulator window; {} pauses.",
+                        size.0, size.1, keymap::TOGGLE_LABEL
+                    )));
+                    rep.send(Msg::MapReady(Some(rt)));
+                }
+                Err(e) => {
+                    rep.send(Msg::Log(format!("ERROR: {e}")));
+                    rep.send(Msg::MapReady(None));
+                }
+            }
+        });
     }
 
     fn on_run_shell(&mut self) {
@@ -1119,6 +1316,211 @@ impl App {
         }
     }
 
+    fn ui_keymap(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Keymap");
+        let enabled = self.km_runtime.is_some();
+        let can_use = !self.busy && self.adb_ok;
+        let mut k = KmClicks::default();
+
+        // --- recording a binding: wait for the next key press ---
+        if let Some((fx, fy)) = self.km_pending {
+            let events = ui.input(|i| i.events.clone());
+            for ev in events {
+                if let egui::Event::Key { key, pressed: true, repeat: false, .. } = ev {
+                    if key == egui::Key::Escape {
+                        self.km_pending = None;
+                    } else if key == egui::Key::F10 {
+                        self.info = Some("F10 is reserved: it pauses and resumes mapping.".to_string());
+                    } else if let Some(label) = keymap::label_for_egui(key) {
+                        if let Some(p) = self.km.as_mut() {
+                            p.set(label, fx, fy);
+                        }
+                        self.km_pending = None;
+                        k.save = true;
+                    } else {
+                        self.info = Some(
+                            "That key can't be used. Try a letter, number, arrow key, Space, or Enter.".to_string(),
+                        );
+                    }
+                }
+            }
+        }
+
+        // --- status ---
+        if !self.adb_ok {
+            ui.colored_label(RED, "Set up the Android SDK first (Setup tab).");
+        } else if !self.adb_connected {
+            ui.colored_label(RED, "No running emulator found. Start a device, wait until it finishes booting, then press Refresh.");
+        } else if enabled && self.km_active {
+            ui.colored_label(
+                GREEN,
+                format!("Mapping is ON. Click into the emulator window and play. Press {} there to pause or resume.", keymap::TOGGLE_LABEL),
+            );
+        } else if enabled {
+            ui.colored_label(
+                ORANGE,
+                format!("Mapping is PAUSED. Press {} in the emulator window to resume.", keymap::TOGGLE_LABEL),
+            );
+        } else {
+            ui.weak("Mapping is off.");
+        }
+        ui.weak("Taps arrive about 0.1-0.3 s late and one spot at a time (no joystick). While mapping is on, mapped keys do not reach the emulator.");
+        ui.add_space(6.0);
+
+        // --- profile row ---
+        let cur_name = self.km.as_ref().map(|p| p.name.clone());
+        ui.horizontal(|ui| {
+            ui.label("Profile:");
+            ui.add_enabled_ui(!enabled, |ui| {
+                egui::ComboBox::from_id_salt("km_profile")
+                    .selected_text(cur_name.clone().unwrap_or_else(|| "(none)".to_string()))
+                    .show_ui(ui, |ui| {
+                        for n in &self.km_profiles {
+                            if ui.selectable_label(cur_name.as_deref() == Some(n.as_str()), n).clicked() {
+                                k.select = Some(n.clone());
+                            }
+                        }
+                    });
+            });
+            ui.add(
+                egui::TextEdit::singleline(&mut self.km_new_name)
+                    .hint_text("New profile (e.g. game name)")
+                    .desired_width(190.0),
+            );
+            k.create = ui.add_enabled(!enabled, egui::Button::new("Create")).clicked();
+            k.delete = ui.add_enabled(cur_name.is_some() && !enabled, egui::Button::new("Delete")).clicked();
+        });
+
+        // --- action row ---
+        let can_toggle = self.adb_ok
+            && !self.km_starting
+            && (enabled || self.km.as_ref().map_or(false, |p| !p.binds.is_empty()));
+        ui.horizontal(|ui| {
+            k.capture = ui.add_enabled(can_use && !enabled, egui::Button::new("Capture screen")).clicked();
+            let label = if enabled { "Turn mapping OFF" } else { "Turn mapping ON" };
+            k.toggle = ui.add_enabled(can_toggle, egui::Button::new(label)).clicked();
+            if enabled {
+                let pause_label = if self.km_active { "Pause" } else { "Resume" };
+                k.pause = ui.button(pause_label).clicked();
+            }
+            k.refresh = ui.add_enabled(!self.busy, egui::Button::new("Refresh")).clicked();
+        });
+        ui.add_space(6.0);
+
+        // --- screen picture + bindings ---
+        if self.km.is_none() {
+            ui.label("Create a profile first (one per game works best), then press \"Capture screen\" while the game is running.");
+        } else {
+            let editing = !enabled;
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| match (&self.km_tex, self.km_dev_size) {
+                    (Some(tex), Some((dw, dh))) => {
+                        let max = egui::vec2(520.0, 460.0);
+                        let scale = (max.x / dw as f32).min(max.y / dh as f32);
+                        let size = egui::vec2(dw as f32 * scale, dh as f32 * scale);
+                        let resp = ui.add(egui::Image::new((tex.id(), size)).sense(egui::Sense::click()));
+
+                        let painter = ui.painter_at(resp.rect);
+                        if let Some(p) = &self.km {
+                            for b in &p.binds {
+                                let pos = resp.rect.min + egui::vec2(b.x * size.x, b.y * size.y);
+                                painter.circle_filled(pos, 12.0, egui::Color32::from_rgba_unmultiplied(61, 220, 132, 220));
+                                let short: String = b.key.chars().take(3).collect();
+                                painter.text(pos, egui::Align2::CENTER_CENTER, short, egui::FontId::proportional(11.0), egui::Color32::BLACK);
+                            }
+                        }
+                        if let Some((px, py)) = self.km_pending {
+                            let pos = resp.rect.min + egui::vec2(px * size.x, py * size.y);
+                            painter.circle_stroke(pos, 14.0, egui::Stroke::new(2.5_f32, ORANGE));
+                        }
+                        if editing && resp.clicked() {
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                let fx = ((pos.x - resp.rect.min.x) / size.x).clamp(0.0, 1.0);
+                                let fy = ((pos.y - resp.rect.min.y) / size.y).clamp(0.0, 1.0);
+                                k.clicked_at = Some((fx, fy));
+                            }
+                        }
+                    }
+                    _ => {
+                        ui.label("Press \"Capture screen\" while your game is running,\nthen click where each on-screen button is.");
+                    }
+                });
+
+                ui.vertical(|ui| {
+                    ui.set_min_width(260.0);
+                    ui.strong("Key bindings");
+                    if self.km_pending.is_some() {
+                        ui.colored_label(ORANGE, "Now press the key for the spot you clicked (Esc cancels).");
+                    } else if editing {
+                        ui.weak("Click a spot on the screen, then press a key.");
+                    } else {
+                        ui.weak("Turn mapping off to edit.");
+                    }
+                    egui::ScrollArea::vertical().id_salt("km_binds").max_height(400.0).show(ui, |ui| {
+                        if let Some(p) = &self.km {
+                            for (i, b) in p.binds.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.monospace(format!("{:<9}", b.key));
+                                    ui.label(format!("{:.0}%, {:.0}%", b.x * 100.0, b.y * 100.0));
+                                    let can_test = can_use && !enabled && self.km_dev_size.is_some();
+                                    if ui.add_enabled(can_test, egui::Button::new("Test")).clicked() {
+                                        k.test = Some(i);
+                                    }
+                                    if ui.add_enabled(editing, egui::Button::new("X")).clicked() {
+                                        k.remove = Some(i);
+                                    }
+                                });
+                            }
+                        }
+                    });
+                });
+            });
+        }
+
+        // --- act on clicks ---
+        if let Some(n) = k.select.take() {
+            self.km_select(&n);
+        }
+        if k.create {
+            self.km_create();
+        }
+        if k.delete {
+            if let Some(n) = cur_name {
+                self.confirm = Some((format!("Delete the keymap profile \"{n}\"?"), Action::DeleteProfile(n)));
+            }
+        }
+        if k.capture {
+            self.km_capture();
+        }
+        if k.refresh {
+            self.adb_refresh();
+        }
+        if k.toggle {
+            self.km_toggle();
+        }
+        if k.pause {
+            self.km_active = !self.km_active;
+            hook::set_active(self.km_active);
+        }
+        if let Some(pos) = k.clicked_at {
+            self.km_pending = Some(pos);
+        }
+        if let Some(i) = k.remove {
+            if let Some(p) = self.km.as_mut() {
+                if i < p.binds.len() {
+                    p.binds.remove(i);
+                }
+            }
+            k.save = true;
+        }
+        if let Some(i) = k.test {
+            self.km_test(i);
+        }
+        if k.save {
+            self.km_save();
+        }
+    }
+
     // ---------- dialogs ----------
 
     fn dialogs(&mut self, ctx: &egui::Context) {
@@ -1193,10 +1595,11 @@ impl eframe::App for App {
                 ui.selectable_value(&mut self.tab, Tab::Images, "System Images");
                 ui.selectable_value(&mut self.tab, Tab::Devices, "Devices");
                 ui.selectable_value(&mut self.tab, Tab::Tools, "ADB Tools");
+                ui.selectable_value(&mut self.tab, Tab::Keymap, "Keymap");
             });
         });
         if self.tab != before {
-            if self.tab == Tab::Tools {
+            if self.tab == Tab::Tools || self.tab == Tab::Keymap {
                 self.adb_refresh();
             } else {
                 self.refresh(false);
@@ -1227,6 +1630,7 @@ impl eframe::App for App {
             Tab::Images => self.ui_images(ui),
             Tab::Devices => self.ui_devices(ui),
             Tab::Tools => self.ui_tools(ui),
+            Tab::Keymap => self.ui_keymap(ui),
         });
 
         // Drag & drop an .apk anywhere on the window to install it.

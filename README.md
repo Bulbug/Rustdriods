@@ -16,6 +16,7 @@ launches them with lean settings, and installs apps by drag and drop.
 - **Setup:** checks virtualization, then downloads the Android SDK tools (and a small Java runtime if your PC has no Java 17+).
 - **System Images:** pick from 11 recommended Android 11-15 images (Google APIs, Google Play, or the lightest AOSP).
 - **Devices:** create virtual devices from presets (Lite, Low-end PC, Balanced, Gaming). The app suggests one for your PC. Start and stop devices, tweak launch options, change RAM and CPU later, and clear saved state to free disk space.
+- **Keymap (experimental):** play with the keyboard. Capture the screen, click where a button is, press the key to bind. One profile per game. See the notes below.
 - **ADB Tools:** drag an `.apk` onto the window to install it, take screenshots, list and uninstall apps, run `adb shell` commands, and copy files to and from the emulator.
 
 <!-- TODO: add screenshots here, e.g. docs/screenshots/devices.png -->
@@ -41,6 +42,15 @@ Each release also lists SHA-256 checksums (`SHA256SUMS.txt`) so you can verify t
 3. In **Devices**, type a name, choose the image and a preset (try **Lite**), and press **Create device**.
 4. Select the device and press **Start selected**. The first boot is slow; later boots are quick.
 5. In **ADB Tools**, press Refresh once the emulator has booted, then drag an `.apk` onto the window.
+
+## Keymap notes (experimental)
+1. Start a device and open your game. In the **Keymap** tab, create a profile and press **Capture screen**.
+2. Click a spot on the picture, then press the key you want for it. Repeat for each button.
+3. Press **Turn mapping ON**, click into the emulator window, and play. **F10** pauses and resumes (handy for typing).
+- Taps use `adb input tap`, so they arrive about 0.1-0.3 s late and only one spot can be tapped at a time (no joystick or multi-touch). That is fine for casual, turn-based, and tower-defense games, not for fast action games.
+- Mapping only works while the **Android Emulator window is in front**. Mapped keys are blocked from reaching the emulator, and every other key behaves normally.
+- Some games detect or ignore injected input.
+- Profiles are small text files in `%LOCALAPPDATA%\AndroidEmulatorManager\keymaps`.
 
 ## Where things are stored
 Everything lives in `%LOCALAPPDATA%\AndroidEmulatorManager` (the Setup tab has an "Open data folder" button):
@@ -88,7 +98,8 @@ src/runner.rs      runs programs and streams their output
 - [x] Phase 6a: packaging (icon, CI, releases)
 - [x] ADB shell and file copy
 - [x] Smarter performance profiles (suggested preset, edit device, saved-state cleanup)
-- [ ] Keymapping for games
+- [x] Keymapping for games (v1: `adb input tap`)
+- [ ] Faster touch injection (multi-touch, joystick) if v1 feels too slow
 
 ## Legal
 This project is not affiliated with or endorsed by Google. Android is a trademark of Google LLC.

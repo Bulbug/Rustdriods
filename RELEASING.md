@@ -21,6 +21,11 @@ git push -u origin main
 - [ ] Update the version in `Cargo.toml` and add an entry in `CHANGELOG.md`.
 - [ ] `cargo test` passes and `cargo build --release` builds with no warnings.
 
+## Just want the exe? (no release needed)
+- **Every push** to `main` runs `CI`. Open the **Actions** tab, click the latest run, scroll to **Artifacts** at the bottom,
+  and download `android-emulator-manager-windows-exe` (a zip with the `.exe` inside).
+- **By hand:** Actions tab > **Release** (or **CI**) > **Run workflow**. Leave the version box empty to only build, or type a name like `v0.7.1` to also publish a release.
+
 ## Make the release
 ```
 git add -A
@@ -35,3 +40,9 @@ release with the `.exe`, a `.zip`, and `SHA256SUMS.txt`.
 - [ ] Download the `.exe` from the release page and run it on a clean Windows PC or user account.
 - [ ] Edit the release notes (they are auto-generated) and add the SmartScreen note.
 - [ ] If something is wrong, delete the release and tag (`git push --delete origin v0.5.0`), fix it, and tag again.
+
+## If no exe appears
+1. Actions tab: is there a run at all? If not, the `.github/workflows` folder was not pushed. Check that it shows on GitHub. (Uploading through the website often skips folders that start with a dot; use `git push` instead.)
+2. A run exists but has a red X: open it, open the red step, and read the last lines. A compile error shows there.
+3. The `Release` workflow only starts when you push a tag that starts with `v` (for example `v0.7.1`). Pushing to `main` only runs `CI`.
+4. A tag name can be used only once. To redo a release, use a new tag, or delete the old one first (see above).

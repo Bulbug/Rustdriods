@@ -205,6 +205,91 @@ pub fn pull(src: &str, dest_dir: &Path, log: &Log) -> Res<()> {
     Ok(())
 }
 
+/// A screenshot that is already shrunk for display. `w` x `h` is the real screen size.
+pub struct Screen {
+    pub w: u32,
+    pub h: u32,
+    pub sw: usize,
+    pub sh: usize,
+    pub rgba: Vec<u8>,
+}
+
+/// Reads the raw output of `screencap` (a small header, then RGBA pixels) and shrinks it so that
+/// its longest side is at most `max_dim` pixels. No image library needed.
+pub fn parse_raw_capture(data: &[u8], max_dim: u32) -> Res<Screen> {
+    if data.len() < 12 {
+        return Err("The screenshot data was too short.".into());
+    }
+    let rd = |i: usize| u32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+    let (w, h, format) = (rd(0), rd(4), rd(8));
+    if w == 0 || h == 0 || format != 1 {
+        return Err(format!("Unsupported screenshot format ({w}x{h}, type {format}).").into());
+    }
+    let pixels = w as usize * h as usize * 4;
+    // Newer Android versions add one more number to the header.
+    let header = if data.len() == 12 + pixels {
+        12
+    } else if data.len() == 16 + pixels {
+        16
+    } else {
+        return Err("The screenshot data had an unexpected size.".into());
+    };
+
+    let step = ((w.max(h) + max_dim - 1) / max_dim).max(1) as usize;
+    let (sw, sh) = ((w as usize + step - 1) / step, (h as usize + step - 1) / step);
+    let mut rgba = Vec::with_capacity(sw * sh * 4);
+    for y in 0..sh {
+        for x in 0..sw {
+            let i = header + ((y * step) * w as usize + x * step) * 4;
+            rgba.extend_from_slice(&[data[i], data[i + 1], data[i + 2], 255]);
+        }
+    }
+    Ok(Screen { w, h, sw, sh, rgba })
+}
+
+pub fn capture_small(max_dim: u32) -> Res<Screen> {
+    let out = adb(&["-e", "exec-out", "screencap"]).output()?;
+    if !out.status.success() {
+        return Err(format!("Screenshot failed: {}", String::from_utf8_lossy(&out.stderr).trim()).into());
+    }
+    parse_raw_capture(&out.stdout, max_dim)
+}
+
+fn parse_wh(s: &str) -> Option<(u32, u32)> {
+    let (w, h) = s.trim().split_once('x')?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+}
+
+/// Reads the output of `wm size`. An "Override size" wins over the "Physical size".
+pub fn parse_screen_size(text: &str) -> Option<(u32, u32)> {
+    let (mut physical, mut over) = (None, None);
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(r) = line.strip_prefix("Physical size:") {
+            physical = parse_wh(r);
+        } else if let Some(r) = line.strip_prefix("Override size:") {
+            over = parse_wh(r);
+        }
+    }
+    over.or(physical)
+}
+
+pub fn screen_size() -> Res<(u32, u32)> {
+    let out = adb(&["-e", "shell", "wm", "size"]).output()?;
+    parse_screen_size(&String::from_utf8_lossy(&out.stdout))
+        .ok_or_else(|| "Could not read the emulator's screen size.".into())
+}
+
+/// One tap at pixel (x, y).
+pub fn tap(x: u32, y: u32) -> Res<()> {
+    let (xs, ys) = (x.to_string(), y.to_string());
+    let out = adb(&["-e", "shell", "input", "tap", &xs, &ys]).output()?;
+    if !out.status.success() {
+        return Err(format!("Tap failed: {}", String::from_utf8_lossy(&out.stderr).trim()).into());
+    }
+    Ok(())
+}
+
 /// Opens a folder in Windows Explorer.
 pub fn open_folder(dir: &Path) {
     let _ = fs::create_dir_all(dir);
@@ -225,5 +310,51 @@ mod tests {
     fn parses_pm_output() {
         let text = "package:com.zeta.app\r\npackage:com.alpha.game\r\n\r\nWarning: something\r\n";
         assert_eq!(parse_packages(text), ["com.alpha.game", "com.zeta.app"]);
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::{parse_raw_capture, parse_screen_size};
+
+    fn fake(header_len: usize) -> Vec<u8> {
+        // 2x2 image: header (w, h, format=1 [, colorspace]) then 4 RGBA pixels
+        let mut d = Vec::new();
+        for v in [2u32, 2, 1] {
+            d.extend_from_slice(&v.to_le_bytes());
+        }
+        if header_len == 16 {
+            d.extend_from_slice(&0u32.to_le_bytes());
+        }
+        for p in 0..4u8 {
+            d.extend_from_slice(&[p, p + 10, p + 20, 0]);
+        }
+        d
+    }
+
+    #[test]
+    fn reads_both_header_sizes() {
+        for hl in [12, 16] {
+            let s = parse_raw_capture(&fake(hl), 960).unwrap();
+            assert_eq!((s.w, s.h, s.sw, s.sh), (2, 2, 2, 2));
+            assert_eq!(&s.rgba[4..8], &[1, 11, 21, 255]);
+        }
+    }
+
+    #[test]
+    fn shrinks_big_screens_and_rejects_garbage() {
+        let s = parse_raw_capture(&fake(12), 1).unwrap();
+        assert_eq!((s.sw, s.sh), (1, 1));
+        assert!(parse_raw_capture(&[1, 2, 3], 960).is_err());
+    }
+
+    #[test]
+    fn override_size_wins() {
+        assert_eq!(parse_screen_size("Physical size: 1080x1920\n"), Some((1080, 1920)));
+        assert_eq!(
+            parse_screen_size("Physical size: 1080x1920\nOverride size: 720x1280\n"),
+            Some((720, 1280))
+        );
+        assert_eq!(parse_screen_size("nothing"), None);
     }
 }
