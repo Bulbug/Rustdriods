@@ -31,6 +31,8 @@ Each release also lists SHA-256 checksums (`SHA256SUMS.txt`) so you can verify t
 > Click **More info > Run anyway**. Some antivirus programs also flag new, unsigned programs by mistake.
 > You can always build it yourself from source (see below).
 
+**Latest beta:** every change is published automatically on the Releases page under the tag `beta` (a pre-release). It is the newest code and may have bugs.
+
 ## Requirements
 - Windows 10 or 11, 64-bit
 - CPU virtualization turned on in the BIOS, plus the **Windows Hypervisor Platform** Windows feature
@@ -38,6 +40,9 @@ Each release also lists SHA-256 checksums (`SHA256SUMS.txt`) so you can verify t
 - Internet for the first setup
 
 ## Quick start
+**Fastest way:** open **Setup** and press **Get started**. It does steps 1-4 below for you.
+
+Or step by step:
 1. Open the app and go to **Setup**. Press **Set up Android SDK** and accept the license prompt.
 2. In **System Images**, install one image (the Google APIs image of Android 14 is a good start; AOSP is the lightest).
 3. In **Devices**, type a name, choose the image and a preset (try **Lite**), and press **Create device**.

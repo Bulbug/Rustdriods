@@ -1,0 +1,77 @@
+name: Beta
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:   # also lets you press "Run workflow" by hand
+
+permissions:
+  contents: write
+
+# If you push twice quickly, only the newest build is published.
+concurrency:
+  group: beta
+  cancel-in-progress: true
+
+jobs:
+  beta:
+    runs-on: windows-latest
+    env:
+      EMU_CHANNEL: beta                # shows "beta" next to the version inside the app
+      EMU_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Check that the exe exists
+        shell: pwsh
+        run: |
+          if (-not (Test-Path target/release/android-emulator-manager.exe)) { throw "The exe was not built" }
+
+      # A failing test is reported in the release notes but does not stop the beta from being published.
+      - name: Tests
+        id: tests
+        continue-on-error: true
+        run: cargo test
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "android-emulator-manager-beta-windows-x64"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/android-emulator-manager.exe dist/
+          Copy-Item README.md, LICENSE dist/
+          Compress-Archive -Path dist/* -DestinationPath "$name.zip" -Force
+          Copy-Item target/release/android-emulator-manager.exe "$name.exe"
+          Get-FileHash "$name.zip", "$name.exe" -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
+            Out-File -Encoding ascii SHA256SUMS.txt
+
+      # Always keep the files on the run page, even if publishing the release fails.
+      - name: Keep the files (run page, under "Artifacts")
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-emulator-manager-beta-files
+          path: |
+            android-emulator-manager-beta-windows-x64.zip
+            android-emulator-manager-beta-windows-x64.exe
+            SHA256SUMS.txt
+          if-no-files-found: error
+
+      # Replaces the previous beta release (and moves the "beta" tag to this commit).
+      - name: Publish the beta release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $short = "${{ github.sha }}".Substring(0,7)
+          $notes = "Automatic beta build of the latest code on main. Not final: expect bugs.`n`nVersion: $ver`nCommit: $short`nTests: ${{ steps.tests.outcome }}`n`nThis release is replaced on every push, so the download links below never change."
+          gh release delete beta --cleanup-tag --yes
+          $global:LASTEXITCODE = 0
+          gh release create beta android-emulator-manager-beta-windows-x64.zip android-emulator-manager-beta-windows-x64.exe SHA256SUMS.txt --prerelease --target "${{ github.sha }}" --title "Beta (latest build, v$ver)" --notes $notes

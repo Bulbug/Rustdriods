@@ -21,6 +21,15 @@ git push -u origin main
 - [ ] Update the version in `Cargo.toml` and add an entry in `CHANGELOG.md`.
 - [ ] `cargo test` passes and `cargo build --release` builds with no warnings.
 
+## Beta (automatic)
+Every push to `main` builds the app and publishes it as the **Beta** release (tag `beta`, marked as a pre-release).
+The previous beta is replaced, so these links never change:
+- `https://github.com/<your-name>/<repo>/releases/tag/beta` (the release page)
+- `https://github.com/<your-name>/<repo>/releases/download/beta/android-emulator-manager-beta-windows-x64.exe` (the exe itself)
+
+The release notes show the version, the commit, and whether the tests passed. Inside the app, the sidebar shows `beta` and the commit.
+To make a proper numbered release, push a tag like `v0.10.1` (see below). Changes that only touch `.md` files do not trigger a beta.
+
 ## Just want the exe? (no release needed)
 - **Every push** to `main` runs `CI`. Open the **Actions** tab, click the latest run, scroll to **Artifacts** at the bottom,
   and download `android-emulator-manager-windows-exe` (a zip with the `.exe` inside).

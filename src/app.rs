@@ -44,6 +44,7 @@ enum Action {
     UninstallApp(String),
     ClearState(String),
     DeleteProfile(String),
+    GetStarted,
 }
 
 struct EnvStatus {
@@ -73,6 +74,7 @@ enum Msg {
     Screen(adb::Screen),
     MapReady(Option<MapRuntime>),
     MapToggle(bool),
+    PendingStart(String),
 }
 
 /// The emulator that is currently running (only one at a time).
@@ -201,6 +203,7 @@ pub struct App {
 
     mode: Mode,
     show_new: bool,
+    pending_start: Option<String>,
 
     km_profiles: Vec<String>,
     km: Option<Profile>,
@@ -274,6 +277,7 @@ impl App {
             edit_preset: Preset::Lite,
             mode,
             show_new: false,
+            pending_start: None,
             km_profiles: keymap::list_profiles(),
             km: None,
             km_new_name: String::new(),
@@ -371,6 +375,48 @@ impl App {
                 self.quit_when_stopped = true;
                 self.on_stop_device();
             }
+            Action::GetStarted => {
+                let Some(img) = self.get_started_image() else { return };
+                let preset = self.get_started_preset();
+                let existing: Vec<String> = self.devices.iter().map(|d| d.name.clone()).collect();
+                let name = unique_device_name(&existing);
+                self.spawn_job(true, move |rep| {
+                    let log = rep.logger();
+                    let java_needed = java::java_home().is_none();
+                    let tools_needed = !sdk::has_cmdline_tools();
+                    let emu_needed = !(sdk::has_platform_tools() && sdk::has_emulator());
+                    let image_needed = !img.is_installed();
+                    let total = [java_needed, tools_needed, emu_needed, image_needed].iter().filter(|b| **b).count() + 2;
+                    let mut n = 0;
+                    let mut step = |label: &str| {
+                        n += 1;
+                        log(format!("Step {n} of {total}: {label}"));
+                    };
+                    if java_needed {
+                        step("Downloading a small Java runtime");
+                        java::download_jre(&|p| rep.progress(Some(p)), &log)?;
+                    }
+                    if tools_needed {
+                        step("Downloading the Android tools");
+                        sdk::download_cmdline_tools(&|p| rep.progress(Some(p)), &log)?;
+                    }
+                    if emu_needed {
+                        step("Installing the emulator");
+                        rep.progress(None);
+                        sdk::install_packages(&log)?;
+                    }
+                    if image_needed {
+                        step("Downloading Android 14 (1-2 GB, this is the long one)");
+                        rep.progress(None);
+                        images::install(&img, &log)?;
+                    }
+                    step("Creating your phone");
+                    devices::create(&name, &img, preset, &log)?;
+                    step("Starting it");
+                    rep.send(Msg::PendingStart(name));
+                    Ok(())
+                });
+            }
             Action::DeleteProfile(name) => {
                 if let Err(e) = keymap::delete(&name) {
                     self.push_log(format!("ERROR: {e}"));
@@ -438,6 +484,7 @@ impl App {
                     self.km_starting = false;
                 }
                 Msg::MapToggle(on) => self.km_active = on,
+                Msg::PendingStart(name) => self.pending_start = Some(name),
                 Msg::EmuExited { code } => {
                     self.km_runtime = None; // the emulator is gone, so mapping stops too
                     self.km_active = false;
@@ -500,6 +547,15 @@ impl App {
         let still_ok = self.new_image.map_or(false, |i| self.installed[i]);
         if !still_ok {
             self.new_image = self.installed.iter().position(|&b| b);
+        }
+        // "Get started" created a device: show it and start it (kept until it shows up in the list).
+        if let Some(name) = self.pending_start.clone() {
+            if let Some(i) = self.devices.iter().position(|d| d.name == name) {
+                self.pending_start = None;
+                self.tab = Tab::Devices;
+                self.sel_device = Some(i);
+                self.on_start_device();
+            }
         }
     }
 
@@ -631,6 +687,41 @@ impl App {
             return;
         };
         self.confirm = Some((format!("Uninstall {pkg}?\nIts data will be erased."), Action::UninstallApp(pkg)));
+    }
+
+    /// The image "Get started" installs: Android 14 with Google APIs.
+    fn get_started_image(&self) -> Option<SystemImage> {
+        self.images.iter().find(|i| i.api == 34 && i.variant == "Google APIs").cloned()
+    }
+
+    fn get_started_preset(&self) -> Preset {
+        self.pc_ram_mb.map(|r| devices::recommend(r, self.pc_cores)).unwrap_or(Preset::Lite)
+    }
+
+    /// Asks before doing the whole setup in one go.
+    fn on_get_started(&mut self) {
+        if self.busy || self.running.is_some() {
+            self.info = Some("Please wait for the current task to finish (or stop the running device) first.".to_string());
+            return;
+        }
+        if self.virt.1 == "Checking..." {
+            self.info = Some("Still checking your PC. Try again in a moment.".to_string());
+            return;
+        }
+        if !self.virt.0 {
+            self.info = Some(format!("Your PC can't run the emulator yet:\n{}", self.virt.1));
+            return;
+        }
+        let Some(img) = self.get_started_image() else { return };
+        let existing: Vec<String> = self.devices.iter().map(|d| d.name.clone()).collect();
+        let text = get_started_text(
+            !self.java_ok,
+            !(self.tools_ok && self.adb_ok && self.emu_ok),
+            !img.is_installed(),
+            &unique_device_name(&existing),
+            self.get_started_preset(),
+        );
+        self.confirm = Some((text, Action::GetStarted));
     }
 
     fn on_save_resources(&mut self) {
@@ -919,6 +1010,34 @@ impl eframe::App for App {
 
 // ---------- small helpers ----------
 
+/// "Phone", or "Phone_2", "Phone_3"... if that name is taken.
+fn unique_device_name(existing: &[String]) -> String {
+    let taken = |n: &str| existing.iter().any(|e| e == n);
+    if !taken("Phone") {
+        return "Phone".to_string();
+    }
+    (2..).map(|i| format!("Phone_{i}")).find(|n| !taken(n)).unwrap_or_else(|| "Phone_new".to_string())
+}
+
+/// What the confirmation window lists. Only steps that are still needed appear.
+fn get_started_text(java: bool, tools: bool, image: bool, name: &str, preset: Preset) -> String {
+    let mut t = String::from("This will:\n");
+    if java {
+        t += "  - download a small Java runtime (about 50 MB)\n";
+    }
+    if tools {
+        t += "  - download the Android tools (a few hundred MB)\n";
+    }
+    if image {
+        t += "  - download Android 14 with Google APIs (1-2 GB)\n";
+    }
+    t += &format!("  - create a phone called \"{name}\" ({}: {})\n", preset.label(), preset.description());
+    t += "  - start it\n\n";
+    t += "By continuing you accept Google's Android SDK License:\nhttps://developer.android.com/studio/terms\n\n";
+    t += "This can take a while. If something fails, press Get started again and it continues where it stopped.";
+    t
+}
+
 fn yes_no(ok: bool) -> &'static str {
     if ok { "Installed" } else { "Not installed" }
 }
@@ -954,6 +1073,27 @@ mod tests {
             screen: "540x960".into(),
             snap_bytes: snap,
         }
+    }
+
+    #[test]
+    fn version_label_starts_with_v() {
+        assert!(views::version_label().starts_with(&format!("v{}", env!("CARGO_PKG_VERSION"))));
+    }
+
+    #[test]
+    fn picks_a_free_device_name() {
+        assert_eq!(unique_device_name(&[]), "Phone");
+        assert_eq!(unique_device_name(&["Phone".to_string()]), "Phone_2");
+        assert_eq!(unique_device_name(&["Phone".to_string(), "Phone_2".to_string()]), "Phone_3");
+    }
+
+    #[test]
+    fn get_started_text_lists_only_what_is_needed() {
+        let all = get_started_text(true, true, true, "Phone", Preset::Lite);
+        assert!(all.contains("Java") && all.contains("Android tools") && all.contains("Android 14"));
+        let only_device = get_started_text(false, false, false, "Phone_2", Preset::Balanced);
+        assert!(!only_device.contains("Java") && !only_device.contains("download Android"));
+        assert!(only_device.contains("Phone_2") && only_device.contains("Balanced"));
     }
 
     #[test]

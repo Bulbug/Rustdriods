@@ -1,8 +1,6 @@
 name: CI
 on:
-  push:
-    branches: [main]
-  pull_request:
+  pull_request:        # pushes to main are built and published by the "Beta" workflow
   workflow_dispatch:   # lets you press "Run workflow" by hand in the Actions tab
 
 jobs:

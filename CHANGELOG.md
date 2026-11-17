@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.1
+- Automatic beta releases: every push to main publishes the `beta` pre-release with the exe, a zip, and checksums
+- The sidebar shows `beta` and the commit for beta builds
+
+## 0.10.0
+- "Get started" button (Setup page, and on an empty Devices page): sets up Java and the Android tools, installs Android 14,
+  creates a phone with the preset suggested for your PC, and starts it, in one go
+- Safe to repeat: every step is skipped when it is already done, so after a failure it continues where it stopped
+
 ## 0.9.1
 - ADB Tools redrawn as a stack of panels: a dashed drop zone for APKs, screenshot, installed apps, speed tweaks, shell commands (with example chips), and file copy
 - Keymap redrawn: a phone on the left with key markers, profile and keycap tiles on the right, clear status chip in the header

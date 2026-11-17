@@ -5,6 +5,18 @@ use crate::theme::{self, Mode, Pal};
 use crate::widgets::{self, Kind, Seg};
 use eframe::egui::{Align, Frame, Layout, Margin, RichText, Rounding, Sense, Stroke};
 
+/// "v0.10.1", or "v0.10.1 beta (abc1234)" for builds made by the Beta workflow.
+pub(super) fn version_label() -> String {
+    let mut s = format!("v{}", env!("CARGO_PKG_VERSION"));
+    if let Some(channel) = option_env!("EMU_CHANNEL") {
+        s += &format!(" {channel}");
+    }
+    if let Some(sha) = option_env!("EMU_COMMIT") {
+        s += &format!(" ({})", &sha[..sha.len().min(7)]);
+    }
+    s
+}
+
 // ---------- sidebar pieces ----------
 
 fn nav_item(ui: &mut egui::Ui, p: &Pal, icon: Icon, label: &str, active: bool) -> bool {
@@ -82,7 +94,7 @@ impl App {
         }
         let mut changed = false;
         ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
-            ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).color(p.mu).small());
+            ui.label(RichText::new(version_label()).color(p.mu).small());
             ui.add_space(6.0);
             changed = theme_toggle(ui, p, &mut self.mode);
         });
@@ -291,6 +303,29 @@ impl App {
 
         widgets::page_header(ui, &p, "Setup", "Get everything ready to run Android", |_| {});
 
+        // One click for beginners: set up everything, make a phone that fits this PC, and start it.
+        let mut get_started = false;
+        if !all_ready || self.devices.is_empty() {
+            widgets::banner(ui, &p, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 3.0;
+                        ui.label(widgets::bold("New here? Get started in one click", 16.0).color(p.tintx));
+                        ui.label(
+                            RichText::new("Sets up the Android tools, downloads Android 14, creates a phone that fits your PC, and starts it.")
+                                .color(p.tintx),
+                        );
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        get_started = widgets::primary(ui, &p, "Get started", !self.busy, 0.0).clicked();
+                    });
+                });
+            });
+        }
+        if get_started {
+            self.on_get_started();
+        }
+
         widgets::panel(ui, &p, |ui| {
             ui.horizontal(|ui| {
                 ui.label(widgets::bold(format!("{ready} of {} ready", items.len()), 22.0));
@@ -440,10 +475,15 @@ impl App {
 
         // --- device rows ---
         let (mut select, mut start_i, mut stop) = (None, None, false);
+        let mut get_started = false;
         if self.devices.is_empty() {
             widgets::panel(ui, &p, |ui| {
                 ui.label(RichText::new("No devices yet. Press \"+ New device\" to create one.").color(p.mu));
+                get_started = widgets::link(ui, &p, "Or set everything up in one click").clicked();
             });
+        }
+        if get_started {
+            self.on_get_started();
         }
         for i in 0..self.devices.len() {
             let d = self.devices[i].clone();
