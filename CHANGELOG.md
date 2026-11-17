@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.1
+- ADB Tools redrawn as a stack of panels: a dashed drop zone for APKs, screenshot, installed apps, speed tweaks, shell commands (with example chips), and file copy
+- Keymap redrawn: a phone on the left with key markers, profile and keycap tiles on the right, clear status chip in the header
+
+## 0.9.0
+- New look: a sidebar with icons, rounded panels, status chips, and one accent colour
+- Light, Dark and Match Windows themes; the choice is remembered
+- Setup shows "N of 5 ready" with a segmented progress bar; Devices opens with Running / Stopped / Saved state numbers
+- New fonts: Plus Jakarta Sans (SIL Open Font License, see assets/fonts/OFL.txt)
+- Bigger default window (1000x680)
+
+## 0.8.0
+- ADB Tools: "Make the running device faster" (animations off, finish background optimization, free caches,
+  turn off optional Google apps, skip app scanning), with Undo for the reversible ones
+- Setup tab shows your graphics card and warns when no graphics driver is installed
+- The suggested graphics mode (Host GPU for NVIDIA/AMD, Auto for Intel) is pre-selected in the launch options
+
 ## 0.7.1
 - GitHub Actions: every build now keeps the exe as a downloadable artifact (CI and Release)
 - CI builds before it runs the tests, so a failing test no longer blocks the exe

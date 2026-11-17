@@ -34,6 +34,36 @@ impl Gpu {
     }
 }
 
+/// What we suggest for the graphics mode, and whether the PC's graphics look healthy.
+pub struct GpuAdvice {
+    pub gpu: Gpu,
+    pub ok: bool,
+    pub note: &'static str,
+}
+
+pub fn advise_gpu(names: &[String]) -> GpuAdvice {
+    let all = names.join(" ").to_lowercase();
+    let discrete = ["nvidia", "geforce", "radeon", "amd"].iter().any(|k| all.contains(k));
+    let intel = all.contains("intel");
+    let basic = all.contains("basic render") || all.contains("basic display");
+
+    if discrete {
+        GpuAdvice { gpu: Gpu::Host, ok: true, note: "Host GPU should be fast on this card" }
+    } else if intel {
+        GpuAdvice { gpu: Gpu::Auto, ok: true, note: "Auto picks the safest fast mode for Intel graphics" }
+    } else if basic {
+        GpuAdvice {
+            gpu: Gpu::Auto,
+            ok: false,
+            note: "No graphics driver found, so the emulator will be slow. Install your graphics driver.",
+        }
+    } else if names.is_empty() {
+        GpuAdvice { gpu: Gpu::Auto, ok: true, note: "Could not read the graphics card" }
+    } else {
+        GpuAdvice { gpu: Gpu::Auto, ok: true, note: "Auto picks a suitable graphics mode" }
+    }
+}
+
 #[derive(Clone)]
 pub struct LaunchOptions {
     pub no_audio: bool,     // -no-audio
@@ -102,6 +132,16 @@ pub fn kill_tree(pid: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graphics_advice() {
+        let n = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(advise_gpu(&n(&["Intel(R) UHD Graphics", "NVIDIA GeForce GTX 1650"])).gpu == Gpu::Host);
+        assert!(advise_gpu(&n(&["Intel(R) UHD Graphics"])).gpu == Gpu::Auto);
+        let basic = advise_gpu(&n(&["Microsoft Basic Display Adapter"]));
+        assert!(!basic.ok && basic.gpu == Gpu::Auto);
+        assert!(advise_gpu(&[]).ok);
+    }
 
     #[test]
     fn lean_defaults() {

@@ -59,6 +59,15 @@ pub fn list_packages(include_system: bool) -> Res<Vec<String>> {
     Ok(parse_packages(&String::from_utf8_lossy(&out.stdout)))
 }
 
+/// Apps that are currently turned off.
+pub fn list_disabled() -> Res<Vec<String>> {
+    let out = adb(&["-e", "shell", "pm", "list", "packages", "-d"]).output()?;
+    if !out.status.success() {
+        return Err(format!("adb failed: {}", String::from_utf8_lossy(&out.stderr).trim()).into());
+    }
+    Ok(parse_packages(&String::from_utf8_lossy(&out.stdout)))
+}
+
 /// (connected?, installed apps). Safe to call any time.
 pub fn snapshot(include_system: bool) -> (bool, Vec<String>) {
     if !is_connected() {

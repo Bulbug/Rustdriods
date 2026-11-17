@@ -16,6 +16,7 @@ launches them with lean settings, and installs apps by drag and drop.
 - **Setup:** checks virtualization, then downloads the Android SDK tools (and a small Java runtime if your PC has no Java 17+).
 - **System Images:** pick from 11 recommended Android 11-15 images (Google APIs, Google Play, or the lightest AOSP).
 - **Devices:** create virtual devices from presets (Lite, Low-end PC, Balanced, Gaming). The app suggests one for your PC. Start and stop devices, tweak launch options, change RAM and CPU later, and clear saved state to free disk space.
+- **Faster:** one-click speed tweaks for the running device (animations off, background optimization, optional Google apps off) and a graphics-card check with a suggested graphics mode.
 - **Keymap (experimental):** play with the keyboard. Capture the screen, click where a button is, press the key to bind. One profile per game. See the notes below.
 - **ADB Tools:** drag an `.apk` onto the window to install it, take screenshots, list and uninstall apps, run `adb shell` commands, and copy files to and from the emulator.
 
@@ -42,6 +43,13 @@ Each release also lists SHA-256 checksums (`SHA256SUMS.txt`) so you can verify t
 3. In **Devices**, type a name, choose the image and a preset (try **Lite**), and press **Create device**.
 4. Select the device and press **Start selected**. The first boot is slow; later boots are quick.
 5. In **ADB Tools**, press Refresh once the emulator has booted, then drag an `.apk` onto the window.
+
+## Making it faster
+What matters most, in order:
+1. **Virtualization on** (Setup tab shows OK) and enough free RAM. Close heavy programs before starting a device.
+2. **Graphics:** a real graphics driver installed (the Setup tab warns if not) and the suggested *Graphics* mode in the launch options. *Host GPU* is fastest on NVIDIA/AMD cards.
+3. **A lighter device:** the *Lite* preset, an *AOSP* image, and a SSD instead of a hard disk.
+4. **ADB Tools > Make the running device faster:** turn off animations and finish the first-boot background optimization (the emulator feels slow for a while after the very first boot until that finishes).
 
 ## Keymap notes (experimental)
 1. Start a device and open your game. In the **Keymap** tab, create a profile and press **Capture screen**.
@@ -79,7 +87,11 @@ Run the tests with `cargo test`.
 ## Project layout
 ```
 src/main.rs        window setup
-src/app.rs         all screens (Setup, System Images, Devices, ADB Tools)
+src/app.rs         app state and actions
+src/app/views.rs   window layout and the Setup, Images and Devices pages
+src/theme.rs       colours, fonts, light and dark
+src/widgets.rs     buttons, chips, panels, rows
+src/icons.rs       the line icons
 src/sdk.rs         downloads and installs the SDK tools
 src/java.rs        finds Java 17+ or downloads a small runtime
 src/images.rs      the recommended system image list
@@ -100,6 +112,12 @@ src/runner.rs      runs programs and streams their output
 - [x] Smarter performance profiles (suggested preset, edit device, saved-state cleanup)
 - [x] Keymapping for games (v1: `adb input tap`)
 - [ ] Faster touch injection (multi-touch, joystick) if v1 feels too slow
+
+## Themes
+The switch at the bottom of the sidebar picks **Light**, **Dark**, or **Match Windows**. Your choice is remembered.
+
+## Credits
+The interface font is [Plus Jakarta Sans](https://github.com/tokotype/PlusJakartaSans) by Tokotype, used under the SIL Open Font License 1.1 (`assets/fonts/OFL.txt`).
 
 ## Legal
 This project is not affiliated with or endorsed by Google. Android is a trademark of Google LLC.

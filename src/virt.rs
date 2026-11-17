@@ -26,6 +26,25 @@ pub fn check() -> VirtInfo {
     }
 }
 
+/// Names of the graphics cards (for example "NVIDIA GeForce GTX 1650", "Intel(R) UHD Graphics").
+pub fn gpu_names() -> Vec<String> {
+    let mut cmd = Command::new("powershell");
+    cmd.args([
+        "-NoProfile",
+        "-Command",
+        "Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }",
+    ]);
+    no_window(&mut cmd);
+    match cmd.output() {
+        Ok(o) => parse_gpus(&String::from_utf8_lossy(&o.stdout)),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn parse_gpus(text: &str) -> Vec<String> {
+    text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
+}
+
 /// Reads the three lines PowerShell prints: hypervisor, BIOS virtualization, RAM in bytes.
 /// (If the RAM line is missing we still report virtualization.)
 fn parse(text: &str) -> VirtInfo {
@@ -51,13 +70,19 @@ fn parse(text: &str) -> VirtInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{parse, parse_gpus};
 
     #[test]
     fn reads_all_three_lines() {
         let v = parse("True\r\nFalse\r\n17036599296\r\n");
         assert!(v.ok);
         assert_eq!(v.ram_mb, Some(16247));
+    }
+
+    #[test]
+    fn reads_graphics_card_names() {
+        let g = parse_gpus("Intel(R) UHD Graphics\r\n\r\nNVIDIA GeForce GTX 1650\r\n");
+        assert_eq!(g, ["Intel(R) UHD Graphics", "NVIDIA GeForce GTX 1650"]);
     }
 
     #[test]

@@ -3,6 +3,10 @@
 
 mod adb;
 mod app;
+mod icons;
+mod settings;
+mod theme;
+mod widgets;
 mod devices;
 mod download;
 mod hook;
@@ -11,6 +15,7 @@ mod images;
 mod java;
 mod keymap;
 mod launcher;
+mod optimize;
 mod paths;
 mod runner;
 mod sdk;
@@ -23,8 +28,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_icon(app_icon())
-            .with_inner_size([820.0, 640.0])
-            .with_min_inner_size([640.0, 480.0]),
+            .with_inner_size([1000.0, 680.0])
+            .with_min_inner_size([860.0, 560.0]),
         ..Default::default()
     };
     eframe::run_native(

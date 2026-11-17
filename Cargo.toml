@@ -1,6 +1,6 @@
 [package]
 name = "android-emulator-manager"
-version = "0.7.1"
+version = "0.9.1"
 edition = "2021"
 description = "Lightweight Windows control panel for Google's Android Emulator"
 license = "MIT"

@@ -2,10 +2,14 @@
 //! Heavy work runs on background threads and reports back through a channel.
 use crate::adb;
 use crate::keymap::{self, Profile};
+use crate::theme::{self, Mode};
 use crate::{hook, inject};
+
+mod views;
 use crate::devices::{self, DeviceInfo, Preset};
 use crate::images::{self, SystemImage};
 use crate::launcher::{self, Gpu, LaunchOptions};
+use crate::optimize::{self, OptimizeOptions};
 use crate::{java, paths, sdk, virt, Res};
 use eframe::egui;
 use std::collections::HashMap;
@@ -15,9 +19,6 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
-const GREEN: egui::Color32 = egui::Color32::from_rgb(26, 127, 55);
-const RED: egui::Color32 = egui::Color32::from_rgb(198, 40, 40);
-const ORANGE: egui::Color32 = egui::Color32::from_rgb(214, 128, 0);
 
 const SETUP_TEXT: &str = "Setting up the Android SDK means you accept Google's Android SDK License Agreement:\n\
 https://developer.android.com/studio/terms\n\n\
@@ -49,6 +50,7 @@ struct EnvStatus {
     virt: (bool, String),
     java: bool,
     ram_mb: Option<u64>,
+    gpus: Vec<String>,
 }
 
 struct Snapshot {
@@ -134,6 +136,8 @@ struct ToolClicks {
     refresh: bool,
     system_changed: bool,
     run_shell: bool,
+    optimize: bool,
+    restore: bool,
     push: bool,
     pull: bool,
     open_pulled: bool,
@@ -184,6 +188,9 @@ pub struct App {
     push_dest: String,
     pull_src: String,
 
+    gpus: Vec<String>,
+    gpu_auto_set: bool,
+    opt: OptimizeOptions,
     pc_ram_mb: Option<u64>,
     pc_cores: usize,
     preset_auto_set: bool,
@@ -191,6 +198,9 @@ pub struct App {
     edit_ram: u32,
     edit_cores: u32,
     edit_preset: Preset,
+
+    mode: Mode,
+    show_new: bool,
 
     km_profiles: Vec<String>,
     km: Option<Profile>,
@@ -213,10 +223,17 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let mode = crate::settings::load_mode();
+        theme::install(&cc.egui_ctx, mode);
+        Self::with_context(&cc.egui_ctx, mode, true)
+    }
+
+    /// `refresh` = read the PC state in the background right away (switched off in tests).
+    pub fn with_context(ctx: &egui::Context, mode: Mode, refresh: bool) -> Self {
         let (tx, rx) = mpsc::channel();
         let images = images::catalog();
         let app = App {
-            rep: Reporter { tx, ctx: cc.egui_ctx.clone() },
+            rep: Reporter { tx, ctx: ctx.clone() },
             rx,
             tab: Tab::Setup,
             busy: false,
@@ -245,6 +262,9 @@ impl App {
             push_src: String::new(),
             push_dest: "/sdcard/Download/".to_string(),
             pull_src: "/sdcard/Download/".to_string(),
+            gpus: Vec::new(),
+            gpu_auto_set: false,
+            opt: OptimizeOptions::default(),
             pc_ram_mb: None,
             pc_cores: thread::available_parallelism().map(|n| n.get()).unwrap_or(2),
             preset_auto_set: false,
@@ -252,6 +272,8 @@ impl App {
             edit_ram: 2048,
             edit_cores: 2,
             edit_preset: Preset::Lite,
+            mode,
+            show_new: false,
             km_profiles: keymap::list_profiles(),
             km: None,
             km_new_name: String::new(),
@@ -268,7 +290,9 @@ impl App {
             confirm: None,
             info: None,
         };
-        app.refresh(true);
+        if refresh {
+            app.refresh(true);
+        }
         app
     }
 
@@ -285,6 +309,7 @@ impl App {
                     virt: (v.ok, v.message),
                     java: java::java_home().is_some(),
                     ram_mb: v.ram_mb,
+                    gpus: virt::gpu_names(),
                 })
             } else {
                 None
@@ -452,6 +477,11 @@ impl App {
             self.virt = env.virt;
             self.java_ok = env.java;
             self.pc_ram_mb = env.ram_mb;
+            self.gpus = env.gpus;
+            if !self.gpu_auto_set && !self.gpus.is_empty() {
+                self.opts.gpu = launcher::advise_gpu(&self.gpus).gpu;
+                self.gpu_auto_set = true;
+            }
             if !self.preset_auto_set {
                 if let Some(ram) = env.ram_mb {
                     self.new_preset = devices::recommend(ram, self.pc_cores);
@@ -743,6 +773,28 @@ impl App {
         });
     }
 
+    /// Applies (or undoes) the speed tweaks on the running emulator.
+    fn on_optimize(&mut self, restore: bool) {
+        if self.busy || !self.adb_ok {
+            return;
+        }
+        let opts = self.opt.clone();
+        self.spawn_job(false, move |rep| {
+            adb::require_connected()?;
+            let log = rep.logger();
+            // Only touch Google apps that really exist (or, when undoing, that are really turned off).
+            let present: Vec<String> = if opts.disable_google_apps {
+                let list = if restore { adb::list_disabled()? } else { adb::list_packages(true)? };
+                list.into_iter()
+                    .filter(|p| optimize::OPTIONAL_GOOGLE_APPS.contains(&p.as_str()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            optimize::run(&optimize::plan(&opts, restore, &present), &log)
+        });
+    }
+
     fn on_run_shell(&mut self) {
         let cmd = self.shell_cmd.trim().to_string();
         if cmd.is_empty() {
@@ -857,823 +909,15 @@ impl App {
     }
 
     // ---------- tabs ----------
-
-    fn ui_setup(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Setup");
-        ui.add_space(6.0);
-        egui::Grid::new("status").num_columns(2).spacing([20.0, 8.0]).show(ui, |ui| {
-            status_row(ui, "Virtualization", self.virt.0, &self.virt.1);
-            let java_text = if self.java_ok {
-                "Found"
-            } else {
-                "Not found - a small runtime (~50 MB) will be downloaded"
-            };
-            status_row(ui, "Java 17+ (for SDK tools)", self.java_ok, java_text);
-            status_row(ui, "SDK command-line tools", self.tools_ok, yes_no(self.tools_ok));
-            status_row(ui, "Platform-tools (adb)", self.adb_ok, yes_no(self.adb_ok));
-            status_row(ui, "Android Emulator", self.emu_ok, yes_no(self.emu_ok));
-        });
-        ui.add_space(10.0);
-
-        let all_ready = self.java_ok && self.tools_ok && self.adb_ok && self.emu_ok;
-        let (mut setup, mut check) = (false, false);
-        ui.horizontal(|ui| {
-            setup = ui
-                .add_enabled(!self.busy && !all_ready, egui::Button::new("Set up Android SDK"))
-                .clicked();
-            check = ui.add_enabled(!self.busy, egui::Button::new("Check again")).clicked();
-        });
-        if setup {
-            self.confirm = Some((SETUP_TEXT.to_string(), Action::Setup));
-        }
-        if check {
-            self.refresh(true);
-        }
-
-        // About: handy for bug reports, and shows where everything is stored.
-        ui.add_space(16.0);
-        ui.separator();
-        ui.weak(format!("Android Emulator Manager v{}", env!("CARGO_PKG_VERSION")));
-        ui.weak(format!("Data folder: {}", paths::home().display()));
-        if ui.small_button("Open data folder").clicked() {
-            adb::open_folder(&paths::home());
-        }
-    }
-
-    fn ui_images(&mut self, ui: &mut egui::Ui) {
-        ui.heading("System Images");
-        if !self.tools_ok {
-            ui.colored_label(RED, "Set up the Android SDK first (Setup tab).");
-        }
-        ui.add_space(6.0);
-
-        let mut sel = self.sel_image;
-        egui::Grid::new("images").striped(true).num_columns(3).spacing([28.0, 6.0]).show(ui, |ui| {
-            ui.strong("Android");
-            ui.strong("Type");
-            ui.strong("Status");
-            ui.end_row();
-            for (i, img) in self.images.iter().enumerate() {
-                if ui.selectable_label(sel == Some(i), img.android_label()).clicked() {
-                    sel = Some(i);
-                }
-                ui.label(img.variant);
-                if self.installed[i] {
-                    ui.colored_label(GREEN, "Installed");
-                } else {
-                    ui.label("Not installed");
-                }
-                ui.end_row();
-            }
-        });
-        self.sel_image = sel;
-
-        ui.add_space(6.0);
-        ui.label(
-            "Tip: \"Google APIs\" allows root. \"Google Play\" has the Play Store but can't be rooted. \
-             \"AOSP\" has no Google services and is the lightest.",
-        );
-        ui.add_space(8.0);
-
-        let (mut install, mut delete, mut refresh) = (false, false, false);
-        ui.horizontal(|ui| {
-            install = ui
-                .add_enabled(!self.busy && self.tools_ok, egui::Button::new("Install selected"))
-                .clicked();
-            delete = ui
-                .add_enabled(!self.busy && self.tools_ok, egui::Button::new("Delete selected"))
-                .clicked();
-            refresh = ui.add_enabled(!self.busy, egui::Button::new("Refresh")).clicked();
-        });
-        if install {
-            self.on_install_image();
-        }
-        if delete {
-            self.on_delete_image();
-        }
-        if refresh {
-            self.refresh(false);
-        }
-    }
-
-    fn ui_devices(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Devices");
-        let any_installed = self.installed.iter().any(|&b| b);
-        if !self.tools_ok {
-            ui.colored_label(RED, "Set up the Android SDK first (Setup tab).");
-        } else if !any_installed {
-            ui.colored_label(RED, "Install a system image first (System Images tab).");
-        }
-        ui.add_space(6.0);
-
-        if self.devices.is_empty() {
-            ui.label("No devices yet. Create one below.");
-        } else {
-            let mut sel = self.sel_device;
-            egui::Grid::new("devices").striped(true).num_columns(7).spacing([24.0, 6.0]).show(ui, |ui| {
-                for h in ["Name", "Android", "RAM", "Cores", "Screen", "Saved state", "Status"] {
-                    ui.strong(h);
-                }
-                ui.end_row();
-                for (i, d) in self.devices.iter().enumerate() {
-                    if ui.selectable_label(sel == Some(i), &d.name).clicked() {
-                        sel = Some(i);
-                    }
-                    ui.label(friendly(&self.images, &d.sysdir));
-                    ui.label(devices::ram_label(&d.ram));
-                    ui.label(&d.cores);
-                    ui.label(&d.screen);
-                    ui.label(devices::human_size(d.snap_bytes));
-                    if self.running.as_ref().map_or(false, |r| r.name == d.name) {
-                        ui.colored_label(GREEN, "Running");
-                    } else {
-                        ui.label("");
-                    }
-                    ui.end_row();
-                }
-            });
-            self.sel_device = sel;
-        }
-
-        ui.add_space(8.0);
-        let running_now = self.running.is_some();
-        let stopping = self.running.as_ref().map_or(false, |r| r.stopping);
-        let (mut start, mut stop) = (false, false);
-        ui.horizontal(|ui| {
-            start = ui
-                .add_enabled(!running_now && !self.busy && self.tools_ok, egui::Button::new("Start selected"))
-                .clicked();
-            stop = ui.add_enabled(running_now && !stopping, egui::Button::new("Stop")).clicked();
-            if let Some(r) = &self.running {
-                ui.colored_label(GREEN, format!("Running: {}", r.name));
-            }
-        });
-        egui::CollapsingHeader::new("Launch options (lean by default)").show(ui, |ui| {
-            ui.checkbox(&mut self.opts.no_audio, "Mute audio (saves CPU)");
-            ui.checkbox(&mut self.opts.no_boot_anim, "Skip boot animation");
-            ui.checkbox(&mut self.opts.quick_boot, "Quick boot (resume from saved state)");
-            ui.checkbox(&mut self.opts.no_save, "Don't save state on exit (saves disk space)");
-            ui.horizontal(|ui| {
-                ui.label("Graphics:");
-                egui::ComboBox::from_id_salt("gpu").selected_text(self.opts.gpu.label()).show_ui(ui, |ui| {
-                    for g in Gpu::ALL {
-                        ui.selectable_value(&mut self.opts.gpu, g, g.label());
-                    }
-                });
-            });
-        });
-        if start {
-            self.on_start_device();
-        }
-        if stop {
-            self.on_stop_device();
-        }
-
-        // ----- manage the selected device: RAM, cores, saved state -----
-        let selected: Option<DeviceInfo> = self.sel_device.and_then(|i| self.devices.get(i).cloned());
-        let sel_name = selected.as_ref().map(|d| d.name.clone());
-        if sel_name != self.edit_for {
-            self.edit_for = sel_name;
-            if let Some(d) = &selected {
-                self.edit_ram = devices::leading_number(&d.ram).unwrap_or(2048);
-                self.edit_cores = devices::leading_number(&d.cores).unwrap_or(2);
-            }
-        }
-        let max_ram = self.pc_ram_mb.map_or(8192, |r| ((r * 3 / 4) as u32).clamp(2048, 16384));
-        let max_cores = (self.pc_cores as u32).clamp(1, 8);
-        let (mut save, mut fill, mut clear) = (false, false, false);
-        egui::CollapsingHeader::new("Manage selected device (RAM, CPU, saved state)").show(ui, |ui| {
-            let Some(d) = &selected else {
-                ui.label("Select a device in the table first.");
-                return;
-            };
-            let is_running = self.running.as_ref().map_or(false, |r| r.name == d.name);
-            if is_running {
-                ui.colored_label(RED, "Stop this device first to change it.");
-            }
-            ui.add_enabled_ui(!is_running && !self.busy, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("RAM:");
-                    ui.add(egui::Slider::new(&mut self.edit_ram, 1024..=max_ram).step_by(256.0).suffix(" MB"));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("CPU cores:");
-                    ui.add(egui::Slider::new(&mut self.edit_cores, 1..=max_cores));
-                });
-                if let Some(pc) = self.pc_ram_mb {
-                    if self.edit_ram as u64 * 2 > pc {
-                        ui.colored_label(RED, "That is more than half of your PC's RAM. Windows and other programs may slow down.");
-                    }
-                }
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("edit_preset")
-                        .selected_text(self.edit_preset.label())
-                        .show_ui(ui, |ui| {
-                            for p in Preset::ALL {
-                                ui.selectable_value(&mut self.edit_preset, p, p.label());
-                            }
-                        });
-                    fill = ui.button("Fill from preset").clicked();
-                    save = ui.button("Save changes").clicked();
-                });
-                ui.weak("Saving also clears the saved state, so the next start is a full boot.");
-                ui.horizontal(|ui| {
-                    ui.label(format!("Saved state (quick boot): {}", devices::human_size(d.snap_bytes)));
-                    clear = ui.add_enabled(d.snap_bytes > 0, egui::Button::new("Clear saved state")).clicked();
-                });
-            });
-        });
-        if fill {
-            self.edit_ram = self.edit_preset.ram_mb();
-            self.edit_cores = self.edit_preset.effective_cores() as u32;
-        }
-        if save {
-            self.on_save_resources();
-        }
-        if clear {
-            self.on_clear_state();
-        }
-
-        ui.add_space(8.0);
-        ui.separator();
-        ui.strong("New device");
-        let rec = self.pc_ram_mb.map(|r| devices::recommend(r, self.pc_cores));
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.new_name).hint_text("Device name").desired_width(150.0));
-
-            let img_text = self
-                .new_image
-                .map(|i| self.images[i].display_name())
-                .unwrap_or_else(|| "Pick an image".to_string());
-            egui::ComboBox::from_id_salt("new_image").selected_text(img_text).show_ui(ui, |ui| {
-                for (i, img) in self.images.iter().enumerate() {
-                    if self.installed[i] {
-                        ui.selectable_value(&mut self.new_image, Some(i), img.display_name());
-                    }
-                }
-            });
-
-            egui::ComboBox::from_id_salt("new_preset")
-                .selected_text(self.new_preset.label())
-                .show_ui(ui, |ui| {
-                    for p in Preset::ALL {
-                        let text = if rec == Some(p) {
-                            format!("{} (suggested)", p.label())
-                        } else {
-                            p.label().to_string()
-                        };
-                        ui.selectable_value(&mut self.new_preset, p, text);
-                    }
-                });
-        });
-        ui.label(self.new_preset.description());
-        if let Some(ram) = self.pc_ram_mb {
-            ui.weak(format!(
-                "Your PC: {:.0} GB RAM, {} CPU threads. Suggested preset: {}.",
-                ram as f64 / 1024.0,
-                self.pc_cores,
-                devices::recommend(ram, self.pc_cores).label()
-            ));
-        }
-        ui.add_space(8.0);
-
-        let (mut create, mut delete, mut refresh) = (false, false, false);
-        ui.horizontal(|ui| {
-            create = ui
-                .add_enabled(
-                    !self.busy && self.tools_ok && any_installed,
-                    egui::Button::new("Create device"),
-                )
-                .clicked();
-            delete = ui
-                .add_enabled(!self.busy && self.tools_ok, egui::Button::new("Delete selected"))
-                .clicked();
-            refresh = ui.add_enabled(!self.busy, egui::Button::new("Refresh")).clicked();
-        });
-        if create {
-            self.on_create_device();
-        }
-        if delete {
-            self.on_delete_device();
-        }
-        if refresh {
-            self.refresh(false);
-        }
-    }
-
-    fn ui_tools(&mut self, ui: &mut egui::Ui) {
-        ui.heading("ADB Tools");
-        if !self.adb_ok {
-            ui.colored_label(RED, "Set up the Android SDK first (Setup tab).");
-        } else if self.adb_connected {
-            ui.colored_label(GREEN, "Emulator connected");
-        } else {
-            ui.colored_label(
-                RED,
-                "No running emulator found. Start a device (Devices tab), wait until it finishes booting, then press Refresh.",
-            );
-        }
-        ui.add_space(6.0);
-
-        let can_use = !self.busy && self.adb_ok;
-        let mut c = ToolClicks::default();
-
-        let filter = self.app_filter.to_lowercase();
-        let shown: Vec<&String> = self.apps.iter().filter(|a| a.to_lowercase().contains(&filter)).collect();
-
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            // ----- install -----
-            ui.strong("Install an app");
-            ui.label("Drag an .apk file onto this window, or paste its path:");
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.apk_path)
-                        .hint_text(r"C:\path\to\app.apk")
-                        .desired_width(360.0),
-                );
-                c.install = ui.add_enabled(can_use, egui::Button::new("Install")).clicked();
-            });
-
-            // ----- screenshot -----
-            ui.add_space(8.0);
-            ui.separator();
-            ui.strong("Screenshot");
-            ui.horizontal(|ui| {
-                c.shot = ui.add_enabled(can_use, egui::Button::new("Take screenshot")).clicked();
-                c.open_shots = ui.button("Open screenshots folder").clicked();
-            });
-
-            // ----- installed apps -----
-            ui.add_space(8.0);
-            ui.separator();
-            ui.strong("Installed apps");
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.app_filter).hint_text("Filter").desired_width(200.0));
-                c.system_changed = ui.checkbox(&mut self.show_system, "Show system apps").changed();
-                c.refresh = ui.add_enabled(!self.busy, egui::Button::new("Refresh")).clicked();
-            });
-            egui::ScrollArea::vertical()
-                .id_salt("apps_list")
-                .max_height(180.0)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    if shown.is_empty() {
-                        ui.label(if self.adb_connected { "No apps to show." } else { "-" });
-                    }
-                    for pkg in &shown {
-                        let selected = self.sel_app.as_deref() == Some(pkg.as_str());
-                        if ui.selectable_label(selected, pkg.as_str()).clicked() {
-                            self.sel_app = Some((*pkg).clone());
-                        }
-                    }
-                });
-            c.uninstall = ui.add_enabled(can_use, egui::Button::new("Uninstall selected")).clicked();
-
-            // ----- shell -----
-            ui.add_space(8.0);
-            ui.separator();
-            ui.strong("Run a command in the emulator (adb shell)");
-            ui.horizontal(|ui| {
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut self.shell_cmd)
-                        .hint_text("e.g. getprop ro.build.version.release")
-                        .desired_width(420.0),
-                );
-                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                let clicked = ui.add_enabled(can_use, egui::Button::new("Run")).clicked();
-                c.run_shell = clicked || (enter && can_use);
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Examples:");
-                for (label, cmd) in SHELL_EXAMPLES {
-                    if ui.small_button(label).clicked() {
-                        self.shell_cmd = cmd.to_string();
-                    }
-                }
-            });
-            ui.weak("The output appears in the log below. Commands run on the emulator only, never on your PC.");
-
-            // ----- files -----
-            ui.add_space(8.0);
-            ui.separator();
-            ui.strong("Copy files");
-            ui.label("PC to emulator (you can also drag any file onto this window):");
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.push_src)
-                        .hint_text(r"C:\path\to\file")
-                        .desired_width(260.0),
-                );
-                ui.label("to");
-                ui.add(egui::TextEdit::singleline(&mut self.push_dest).desired_width(160.0));
-                c.push = ui.add_enabled(can_use, egui::Button::new("Copy to emulator")).clicked();
-            });
-            ui.label("Emulator to PC:");
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.pull_src)
-                        .hint_text("/sdcard/Download/file.txt")
-                        .desired_width(260.0),
-                );
-                c.pull = ui.add_enabled(can_use, egui::Button::new("Copy to PC")).clicked();
-                c.open_pulled = ui.button("Open folder").clicked();
-            });
-            ui.weak("Files copied to the PC go to Downloads\\AndroidEmulatorManager.");
-            ui.add_space(8.0);
-        });
-
-        if c.install {
-            let path = adb::clean_path(&self.apk_path);
-            if path.is_empty() {
-                self.info = Some("Drop an .apk file here, or paste its path first.".to_string());
-            } else {
-                self.on_install_apk(PathBuf::from(path));
-            }
-        }
-        if c.shot {
-            self.on_screenshot();
-        }
-        if c.open_shots {
-            adb::open_folder(&paths::screenshots_dir());
-        }
-        if c.uninstall {
-            self.on_uninstall_app();
-        }
-        if c.refresh || c.system_changed {
-            self.adb_refresh();
-        }
-        if c.run_shell {
-            self.on_run_shell();
-        }
-        if c.push {
-            self.on_push();
-        }
-        if c.pull {
-            self.on_pull();
-        }
-        if c.open_pulled {
-            adb::open_folder(&paths::pulled_dir());
-        }
-    }
-
-    fn ui_keymap(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Keymap");
-        let enabled = self.km_runtime.is_some();
-        let can_use = !self.busy && self.adb_ok;
-        let mut k = KmClicks::default();
-
-        // --- recording a binding: wait for the next key press ---
-        if let Some((fx, fy)) = self.km_pending {
-            let events = ui.input(|i| i.events.clone());
-            for ev in events {
-                if let egui::Event::Key { key, pressed: true, repeat: false, .. } = ev {
-                    if key == egui::Key::Escape {
-                        self.km_pending = None;
-                    } else if key == egui::Key::F10 {
-                        self.info = Some("F10 is reserved: it pauses and resumes mapping.".to_string());
-                    } else if let Some(label) = keymap::label_for_egui(key) {
-                        if let Some(p) = self.km.as_mut() {
-                            p.set(label, fx, fy);
-                        }
-                        self.km_pending = None;
-                        k.save = true;
-                    } else {
-                        self.info = Some(
-                            "That key can't be used. Try a letter, number, arrow key, Space, or Enter.".to_string(),
-                        );
-                    }
-                }
-            }
-        }
-
-        // --- status ---
-        if !self.adb_ok {
-            ui.colored_label(RED, "Set up the Android SDK first (Setup tab).");
-        } else if !self.adb_connected {
-            ui.colored_label(RED, "No running emulator found. Start a device, wait until it finishes booting, then press Refresh.");
-        } else if enabled && self.km_active {
-            ui.colored_label(
-                GREEN,
-                format!("Mapping is ON. Click into the emulator window and play. Press {} there to pause or resume.", keymap::TOGGLE_LABEL),
-            );
-        } else if enabled {
-            ui.colored_label(
-                ORANGE,
-                format!("Mapping is PAUSED. Press {} in the emulator window to resume.", keymap::TOGGLE_LABEL),
-            );
-        } else {
-            ui.weak("Mapping is off.");
-        }
-        ui.weak("Taps arrive about 0.1-0.3 s late and one spot at a time (no joystick). While mapping is on, mapped keys do not reach the emulator.");
-        ui.add_space(6.0);
-
-        // --- profile row ---
-        let cur_name = self.km.as_ref().map(|p| p.name.clone());
-        ui.horizontal(|ui| {
-            ui.label("Profile:");
-            ui.add_enabled_ui(!enabled, |ui| {
-                egui::ComboBox::from_id_salt("km_profile")
-                    .selected_text(cur_name.clone().unwrap_or_else(|| "(none)".to_string()))
-                    .show_ui(ui, |ui| {
-                        for n in &self.km_profiles {
-                            if ui.selectable_label(cur_name.as_deref() == Some(n.as_str()), n).clicked() {
-                                k.select = Some(n.clone());
-                            }
-                        }
-                    });
-            });
-            ui.add(
-                egui::TextEdit::singleline(&mut self.km_new_name)
-                    .hint_text("New profile (e.g. game name)")
-                    .desired_width(190.0),
-            );
-            k.create = ui.add_enabled(!enabled, egui::Button::new("Create")).clicked();
-            k.delete = ui.add_enabled(cur_name.is_some() && !enabled, egui::Button::new("Delete")).clicked();
-        });
-
-        // --- action row ---
-        let can_toggle = self.adb_ok
-            && !self.km_starting
-            && (enabled || self.km.as_ref().map_or(false, |p| !p.binds.is_empty()));
-        ui.horizontal(|ui| {
-            k.capture = ui.add_enabled(can_use && !enabled, egui::Button::new("Capture screen")).clicked();
-            let label = if enabled { "Turn mapping OFF" } else { "Turn mapping ON" };
-            k.toggle = ui.add_enabled(can_toggle, egui::Button::new(label)).clicked();
-            if enabled {
-                let pause_label = if self.km_active { "Pause" } else { "Resume" };
-                k.pause = ui.button(pause_label).clicked();
-            }
-            k.refresh = ui.add_enabled(!self.busy, egui::Button::new("Refresh")).clicked();
-        });
-        ui.add_space(6.0);
-
-        // --- screen picture + bindings ---
-        if self.km.is_none() {
-            ui.label("Create a profile first (one per game works best), then press \"Capture screen\" while the game is running.");
-        } else {
-            let editing = !enabled;
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| match (&self.km_tex, self.km_dev_size) {
-                    (Some(tex), Some((dw, dh))) => {
-                        let max = egui::vec2(520.0, 460.0);
-                        let scale = (max.x / dw as f32).min(max.y / dh as f32);
-                        let size = egui::vec2(dw as f32 * scale, dh as f32 * scale);
-                        let resp = ui.add(egui::Image::new((tex.id(), size)).sense(egui::Sense::click()));
-
-                        let painter = ui.painter_at(resp.rect);
-                        if let Some(p) = &self.km {
-                            for b in &p.binds {
-                                let pos = resp.rect.min + egui::vec2(b.x * size.x, b.y * size.y);
-                                painter.circle_filled(pos, 12.0, egui::Color32::from_rgba_unmultiplied(61, 220, 132, 220));
-                                let short: String = b.key.chars().take(3).collect();
-                                painter.text(pos, egui::Align2::CENTER_CENTER, short, egui::FontId::proportional(11.0), egui::Color32::BLACK);
-                            }
-                        }
-                        if let Some((px, py)) = self.km_pending {
-                            let pos = resp.rect.min + egui::vec2(px * size.x, py * size.y);
-                            painter.circle_stroke(pos, 14.0, egui::Stroke::new(2.5_f32, ORANGE));
-                        }
-                        if editing && resp.clicked() {
-                            if let Some(pos) = resp.interact_pointer_pos() {
-                                let fx = ((pos.x - resp.rect.min.x) / size.x).clamp(0.0, 1.0);
-                                let fy = ((pos.y - resp.rect.min.y) / size.y).clamp(0.0, 1.0);
-                                k.clicked_at = Some((fx, fy));
-                            }
-                        }
-                    }
-                    _ => {
-                        ui.label("Press \"Capture screen\" while your game is running,\nthen click where each on-screen button is.");
-                    }
-                });
-
-                ui.vertical(|ui| {
-                    ui.set_min_width(260.0);
-                    ui.strong("Key bindings");
-                    if self.km_pending.is_some() {
-                        ui.colored_label(ORANGE, "Now press the key for the spot you clicked (Esc cancels).");
-                    } else if editing {
-                        ui.weak("Click a spot on the screen, then press a key.");
-                    } else {
-                        ui.weak("Turn mapping off to edit.");
-                    }
-                    egui::ScrollArea::vertical().id_salt("km_binds").max_height(400.0).show(ui, |ui| {
-                        if let Some(p) = &self.km {
-                            for (i, b) in p.binds.iter().enumerate() {
-                                ui.horizontal(|ui| {
-                                    ui.monospace(format!("{:<9}", b.key));
-                                    ui.label(format!("{:.0}%, {:.0}%", b.x * 100.0, b.y * 100.0));
-                                    let can_test = can_use && !enabled && self.km_dev_size.is_some();
-                                    if ui.add_enabled(can_test, egui::Button::new("Test")).clicked() {
-                                        k.test = Some(i);
-                                    }
-                                    if ui.add_enabled(editing, egui::Button::new("X")).clicked() {
-                                        k.remove = Some(i);
-                                    }
-                                });
-                            }
-                        }
-                    });
-                });
-            });
-        }
-
-        // --- act on clicks ---
-        if let Some(n) = k.select.take() {
-            self.km_select(&n);
-        }
-        if k.create {
-            self.km_create();
-        }
-        if k.delete {
-            if let Some(n) = cur_name {
-                self.confirm = Some((format!("Delete the keymap profile \"{n}\"?"), Action::DeleteProfile(n)));
-            }
-        }
-        if k.capture {
-            self.km_capture();
-        }
-        if k.refresh {
-            self.adb_refresh();
-        }
-        if k.toggle {
-            self.km_toggle();
-        }
-        if k.pause {
-            self.km_active = !self.km_active;
-            hook::set_active(self.km_active);
-        }
-        if let Some(pos) = k.clicked_at {
-            self.km_pending = Some(pos);
-        }
-        if let Some(i) = k.remove {
-            if let Some(p) = self.km.as_mut() {
-                if i < p.binds.len() {
-                    p.binds.remove(i);
-                }
-            }
-            k.save = true;
-        }
-        if let Some(i) = k.test {
-            self.km_test(i);
-        }
-        if k.save {
-            self.km_save();
-        }
-    }
-
-    // ---------- dialogs ----------
-
-    fn dialogs(&mut self, ctx: &egui::Context) {
-        // confirm
-        let mut decision: Option<bool> = None;
-        if let Some((text, _)) = &self.confirm {
-            egui::Window::new("Please confirm")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.label(text);
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("OK").clicked() {
-                            decision = Some(true);
-                        }
-                        if ui.button("Cancel").clicked() {
-                            decision = Some(false);
-                        }
-                    });
-                });
-        }
-        match decision {
-            Some(true) => {
-                if let Some((_, action)) = self.confirm.take() {
-                    self.run_action(action);
-                }
-            }
-            Some(false) => self.confirm = None,
-            None => {}
-        }
-
-        // info
-        let mut close = false;
-        if let Some(text) = &self.info {
-            egui::Window::new("Info")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.label(text);
-                    ui.add_space(8.0);
-                    if ui.button("OK").clicked() {
-                        close = true;
-                    }
-                });
-        }
-        if close {
-            self.info = None;
-        }
-    }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.drain();
-
-        // Don't leave an emulator running (with a closed log pipe) when the manager closes.
-        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting && self.running.is_some() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.confirm = Some((
-                "An emulator is running. Stop it and quit?".to_string(),
-                Action::StopAndQuit,
-            ));
-        }
-
-        let before = self.tab;
-        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::Setup, "Setup");
-                ui.selectable_value(&mut self.tab, Tab::Images, "System Images");
-                ui.selectable_value(&mut self.tab, Tab::Devices, "Devices");
-                ui.selectable_value(&mut self.tab, Tab::Tools, "ADB Tools");
-                ui.selectable_value(&mut self.tab, Tab::Keymap, "Keymap");
-            });
-        });
-        if self.tab != before {
-            if self.tab == Tab::Tools || self.tab == Tab::Keymap {
-                self.adb_refresh();
-            } else {
-                self.refresh(false);
-            }
-        }
-
-        egui::TopBottomPanel::bottom("log").resizable(true).default_height(170.0).show(ctx, |ui| {
-            if self.busy {
-                ui.horizontal(|ui| match self.progress {
-                    Some(p) => {
-                        ui.add(egui::ProgressBar::new(p).show_percentage());
-                    }
-                    None => {
-                        ui.spinner();
-                        ui.label("Working...");
-                    }
-                });
-            }
-            egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
-                for line in &self.log {
-                    ui.label(egui::RichText::new(line).monospace());
-                }
-            });
-        });
-
-        egui::CentralPanel::default().show(ctx, |ui| match self.tab {
-            Tab::Setup => self.ui_setup(ui),
-            Tab::Images => self.ui_images(ui),
-            Tab::Devices => self.ui_devices(ui),
-            Tab::Tools => self.ui_tools(ui),
-            Tab::Keymap => self.ui_keymap(ui),
-        });
-
-        // Drag & drop an .apk anywhere on the window to install it.
-        let dropped: Vec<egui::DroppedFile> = ctx.input(|i| i.raw.dropped_files.clone());
-        if let Some(path) = dropped.into_iter().find_map(|f| f.path) {
-            let is_apk = path.extension().map_or(false, |e| e.eq_ignore_ascii_case("apk"));
-            if is_apk {
-                self.on_install_apk(path);
-            } else {
-                self.push_src = path.to_string_lossy().to_string();
-                self.tab = Tab::Tools;
-                self.adb_refresh();
-                self.push_log(format!(
-                    "Ready to copy: {} (press \"Copy to emulator\" on the ADB Tools tab)",
-                    path.display()
-                ));
-            }
-        }
-        if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
-            let rect = ctx.screen_rect();
-            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("drop_overlay")));
-            painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(170));
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "Drop an .apk to install it, or any file to copy it to the emulator",
-                egui::FontId::proportional(24.0),
-                egui::Color32::WHITE,
-            );
-        }
-
-        self.dialogs(ctx);
+        self.draw(ctx);
     }
 }
 
 // ---------- small helpers ----------
-
-fn status_row(ui: &mut egui::Ui, name: &str, ok: bool, text: &str) {
-    ui.strong(name);
-    let (prefix, color) = if ok { ("OK - ", GREEN) } else { ("Missing - ", RED) };
-    ui.colored_label(color, format!("{prefix}{text}"));
-    ui.end_row();
-}
 
 fn yes_no(ok: bool) -> &'static str {
     if ok { "Installed" } else { "Not installed" }
@@ -1688,4 +932,91 @@ fn friendly(images: &[SystemImage], sysdir: &str) -> String {
         }
     }
     sysdir.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicU32};
+
+    fn frame(ctx: &egui::Context, app: &mut App) {
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 680.0)));
+        let _ = ctx.run(raw, |ctx| app.draw(ctx));
+    }
+
+    fn device(name: &str, snap: u64) -> DeviceInfo {
+        DeviceInfo {
+            name: name.into(),
+            sysdir: "system-images/android-34/google_apis/x86_64/".into(),
+            ram: "1536".into(),
+            cores: "2".into(),
+            screen: "540x960".into(),
+            snap_bytes: snap,
+        }
+    }
+
+    #[test]
+    fn every_page_draws_in_light_and_dark() {
+        for mode in [Mode::Light, Mode::Dark] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx, mode);
+            let mut app = App::with_context(&ctx, mode, false);
+            app.tools_ok = true;
+            app.adb_ok = true;
+            app.emu_ok = true;
+            app.java_ok = true;
+            app.adb_connected = true;
+            app.virt = (true, "Ready".into());
+            app.gpus = vec!["NVIDIA GeForce GTX 1650".into()];
+            app.pc_ram_mb = Some(16384);
+            app.installed[2] = true;
+            app.new_image = Some(2);
+            app.devices = vec![device("Pixel_Lite", 1_500_000_000), device("Pixel_Two", 0)];
+            app.running = Some(Running {
+                name: "Pixel_Lite".into(),
+                pid: Arc::new(AtomicU32::new(0)),
+                alive: Arc::new(AtomicBool::new(true)),
+                stopping: false,
+            });
+            app.apps = vec!["com.example.app".into(), "com.other.app".into()];
+            app.sel_device = Some(0);
+            app.sel_image = Some(2);
+            app.show_new = true;
+            app.km = Some(Profile {
+                name: "Game".into(),
+                landscape: false,
+                binds: vec![keymap::Binding { key: "W".into(), x: 0.5, y: 0.5 }],
+            });
+            app.km_profiles = vec!["Game".into()];
+            app.log = vec!["first line".into(), "second line".into()];
+            app.busy = true;
+            app.progress = Some(0.4);
+            app.confirm = Some(("Are you sure?".into(), Action::Setup));
+            app.info = Some("Hello".into());
+            let img = egui::ColorImage::new([4, 4], egui::Color32::from_rgb(90, 90, 240));
+            app.km_tex = Some(ctx.load_texture("test_screen", img, egui::TextureOptions::LINEAR));
+            app.km_pending = Some((0.4, 0.6));
+            for (size, extra) in [((1080, 1920), 0), ((1920, 1080), 1)] {
+                app.km_dev_size = Some(size);
+                app.tab = Tab::Keymap;
+                app.km_active = extra == 0;
+                frame(&ctx, &mut app);
+                frame(&ctx, &mut app);
+            }
+            app.km_pending = None;
+            for tab in [Tab::Setup, Tab::Images, Tab::Devices, Tab::Tools, Tab::Keymap] {
+                app.tab = tab;
+                for _ in 0..3 {
+                    frame(&ctx, &mut app);
+                }
+            }
+            // empty / first-run state too
+            let mut fresh = App::with_context(&ctx, mode, false);
+            for tab in [Tab::Setup, Tab::Images, Tab::Devices, Tab::Tools, Tab::Keymap] {
+                fresh.tab = tab;
+                frame(&ctx, &mut fresh);
+            }
+        }
+    }
 }
