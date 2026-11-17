@@ -201,6 +201,7 @@ pub struct App {
     edit_cores: u32,
     edit_preset: Preset,
 
+    logo: Option<egui::TextureHandle>,
     mode: Mode,
     show_new: bool,
     pending_start: Option<String>,
@@ -275,6 +276,11 @@ impl App {
             edit_ram: 2048,
             edit_cores: 2,
             edit_preset: Preset::Lite,
+            logo: Some(ctx.load_texture(
+                "app_logo",
+                egui::ColorImage::from_rgba_unmultiplied([128, 128], include_bytes!("../assets/logo-128.rgba")),
+                egui::TextureOptions::LINEAR,
+            )),
             mode,
             show_new: false,
             pending_start: None,

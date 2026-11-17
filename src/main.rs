@@ -39,11 +39,11 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-/// The 64x64 window/taskbar icon (raw RGBA bytes, so no image decoder is needed).
+/// The 128x128 window/taskbar icon (raw RGBA bytes, so no image decoder is needed).
 fn app_icon() -> eframe::egui::IconData {
     eframe::egui::IconData {
-        rgba: include_bytes!("../assets/icon-64.rgba").to_vec(),
-        width: 64,
-        height: 64,
+        rgba: include_bytes!("../assets/logo-128.rgba").to_vec(),
+        width: 128,
+        height: 128,
     }
 }

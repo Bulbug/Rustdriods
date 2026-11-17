@@ -75,9 +75,13 @@ impl App {
     fn sidebar(&mut self, ui: &mut egui::Ui, p: &Pal) -> bool {
         ui.spacing_mut().item_spacing.y = 4.0;
         ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), Sense::hover());
-            ui.painter().rect_filled(r, Rounding::same(10.0), p.ac);
-            icons::paint(ui.painter(), Icon::Devices, r.center(), 18.0, p.on, p.ac);
+            if let Some(tex) = &self.logo {
+                ui.add(egui::Image::new((tex.id(), egui::vec2(38.0, 38.0))));
+            } else {
+                let (r, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), Sense::hover());
+                ui.painter().rect_filled(r, Rounding::same(10.0), p.ac);
+                icons::paint(ui.painter(), Icon::Devices, r.center(), 18.0, p.on, p.ac);
+            }
             ui.label(widgets::bold("Emulator Manager", 15.0));
         });
         ui.add_space(18.0);

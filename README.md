@@ -125,6 +125,8 @@ The switch at the bottom of the sidebar picks **Light**, **Dark**, or **Match Wi
 The interface font is [Plus Jakarta Sans](https://github.com/tokotype/PlusJakartaSans) by Tokotype, used under the SIL Open Font License 1.1 (`assets/fonts/OFL.txt`).
 
 ## Legal
+The Android robot in the logo is reproduced or modified from work created and shared by Google and used according to terms described in the Creative Commons 3.0 Attribution License.
+
 This project is not affiliated with or endorsed by Google. Android is a trademark of Google LLC.
 The app downloads Google's Android SDK tools, emulator, and system images directly from Google when you press
 *Set up*, and you accept Google's [SDK license](https://developer.android.com/studio/terms) at that moment.

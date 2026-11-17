@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.10.2
+- New app logo (exe icon, window and taskbar icon, sidebar, README)
+
 ## 0.10.1
 - Automatic beta releases: every push to main publishes the `beta` pre-release with the exe, a zip, and checksums
 - The sidebar shows `beta` and the commit for beta builds
