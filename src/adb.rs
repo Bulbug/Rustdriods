@@ -246,13 +246,12 @@ pub fn parse_raw_capture(data: &[u8], max_dim: u32) -> Res<Screen> {
 
     let step = ((w.max(h) + max_dim - 1) / max_dim).max(1) as usize;
     let (sw, sh) = ((w as usize + step - 1) / step, (h as usize + step - 1) / step);
-    let mut rgba = Vec::with_capacity(sw * sh * 4);
-    for y in 0..sh {
-        for x in 0..sw {
-            let i = header + ((y * step) * w as usize + x * step) * 4;
-            rgba.extend_from_slice(&[data[i], data[i + 1], data[i + 2], 255]);
-        }
+    // The screen's alpha byte is not reliable: treat every pixel as opaque, then average blocks of pixels.
+    let mut px = data[header..header + pixels].to_vec();
+    for a in px.iter_mut().skip(3).step_by(4) {
+        *a = 255;
     }
+    let rgba = crate::image_util::box_resize(&px, w as usize, h as usize, sw, sh);
     Ok(Screen { w, h, sw, sh, rgba })
 }
 

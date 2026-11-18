@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.1
+- Sharper picture: heavier body font (Plus Jakarta Sans Medium), whole-pixel font sizes, and the logo and the Keymap screen picture
+  are now resized to the exact pixels they are shown at, at any Windows display scaling
+
+## 0.11.0
+- "Copy log" in the log bar: copies the log plus your version, PC and setup state, ready to paste into a bug report
+- Crash reports: if the app crashes, the details are saved and shown in the log on the next start
+- Update check: a banner appears when a newer version (or newer beta) is on GitHub; can be turned off, or run by hand ("Check now" on Setup)
+
 ## 0.10.2
 - New app logo (exe icon, window and taskbar icon, sidebar, README)
 

@@ -1,41 +1,57 @@
-//! Tiny settings file (just the colour theme for now): %LOCALAPPDATA%\AndroidEmulatorManager\settings.txt
+//! Tiny settings file: %LOCALAPPDATA%\AndroidEmulatorManager\settings.txt
 use crate::paths;
 use crate::theme::Mode;
 use std::fs;
 
-pub fn parse(text: &str) -> Mode {
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Settings {
+    pub mode: Mode,
+    pub updates: bool, // look for a newer version when the app starts
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings { mode: Mode::Auto, updates: true }
+    }
+}
+
+pub fn parse(text: &str) -> Settings {
+    let mut s = Settings::default();
     for line in text.lines() {
-        if let Some(v) = line.trim().strip_prefix("theme=") {
-            return match v.trim() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("theme=") {
+            s.mode = match v.trim() {
                 "light" => Mode::Light,
                 "dark" => Mode::Dark,
                 _ => Mode::Auto,
             };
+        } else if let Some(v) = line.strip_prefix("updates=") {
+            s.updates = v.trim() != "off";
         }
     }
-    Mode::Auto
+    s
 }
 
-pub fn serialize(mode: Mode) -> String {
-    let v = match mode {
+pub fn serialize(s: &Settings) -> String {
+    let theme = match s.mode {
         Mode::Light => "light",
         Mode::Dark => "dark",
         Mode::Auto => "auto",
     };
-    format!("theme={v}\n")
+    format!("theme={theme}\nupdates={}\n", if s.updates { "on" } else { "off" })
 }
 
 fn file() -> std::path::PathBuf {
     paths::home().join("settings.txt")
 }
 
-pub fn load_mode() -> Mode {
-    fs::read_to_string(file()).map(|t| parse(&t)).unwrap_or(Mode::Auto)
+pub fn load() -> Settings {
+    fs::read_to_string(file()).map(|t| parse(&t)).unwrap_or_default()
 }
 
-pub fn save_mode(mode: Mode) {
+pub fn save(s: &Settings) {
     let _ = fs::create_dir_all(paths::home());
-    let _ = fs::write(file(), serialize(mode));
+    let _ = fs::write(file(), serialize(s));
 }
 
 #[cfg(test)]
@@ -43,10 +59,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn theme_setting_round_trip() {
-        for m in [Mode::Light, Mode::Dark, Mode::Auto] {
-            assert!(parse(&serialize(m)) == m);
+    fn settings_round_trip() {
+        for mode in [Mode::Light, Mode::Dark, Mode::Auto] {
+            for updates in [true, false] {
+                let s = Settings { mode, updates };
+                assert_eq!(parse(&serialize(&s)), s);
+            }
         }
-        assert!(parse("garbage") == Mode::Auto);
+        assert_eq!(parse("garbage"), Settings::default());
+        assert_eq!(parse("theme=dark\n"), Settings { mode: Mode::Dark, updates: true }); // old files still work
     }
 }

@@ -3,19 +3,10 @@ use super::*;
 use crate::icons::{self, Icon};
 use crate::theme::{self, Mode, Pal};
 use crate::widgets::{self, Kind, Seg};
+use crate::update::version_label;
 use eframe::egui::{Align, Frame, Layout, Margin, RichText, Rounding, Sense, Stroke};
 
-/// "v0.10.1", or "v0.10.1 beta (abc1234)" for builds made by the Beta workflow.
-pub(super) fn version_label() -> String {
-    let mut s = format!("v{}", env!("CARGO_PKG_VERSION"));
-    if let Some(channel) = option_env!("EMU_CHANNEL") {
-        s += &format!(" {channel}");
-    }
-    if let Some(sha) = option_env!("EMU_COMMIT") {
-        s += &format!(" ({})", &sha[..sha.len().min(7)]);
-    }
-    s
-}
+const LOGO_RGBA: &[u8] = include_bytes!("../../assets/logo-128.rgba");
 
 // ---------- sidebar pieces ----------
 
@@ -35,7 +26,7 @@ fn nav_item(ui: &mut egui::Ui, p: &Pal, icon: Icon, label: &str, active: bool) -
         egui::pos2(rect.left() + 48.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
         label,
-        egui::FontId::new(13.5, theme::bold_family()),
+        egui::FontId::new(14.0, theme::bold_family()),
         color,
     );
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
@@ -75,7 +66,14 @@ impl App {
     fn sidebar(&mut self, ui: &mut egui::Ui, p: &Pal) -> bool {
         ui.spacing_mut().item_spacing.y = 4.0;
         ui.horizontal(|ui| {
-            if let Some(tex) = &self.logo {
+            // Resize the logo to the exact number of screen pixels it covers, so it stays sharp at any Windows scaling.
+            let px = (38.0 * ui.ctx().pixels_per_point()).round().max(16.0) as u32;
+            if self.logo.as_ref().map_or(true, |(s, _)| *s != px) {
+                let rgba = crate::image_util::box_resize(LOGO_RGBA, 128, 128, px as usize, px as usize);
+                let img = egui::ColorImage::from_rgba_unmultiplied([px as usize, px as usize], &rgba);
+                self.logo = Some((px, ui.ctx().load_texture("app_logo", img, egui::TextureOptions::LINEAR)));
+            }
+            if let Some((_, tex)) = &self.logo {
                 ui.add(egui::Image::new((tex.id(), egui::vec2(38.0, 38.0))));
             } else {
                 let (r, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), Sense::hover());
@@ -128,7 +126,7 @@ impl App {
             });
         if mode_changed {
             theme::set_mode(ctx, self.mode);
-            crate::settings::save_mode(self.mode);
+            crate::settings::save(&crate::settings::Settings { mode: self.mode, updates: self.check_updates });
         }
         if self.tab != before {
             if self.tab == Tab::Tools || self.tab == Tab::Keymap {
@@ -138,7 +136,7 @@ impl App {
             }
         }
 
-        let mut clear_log = false;
+        let (mut clear_log, mut copy_log) = (false, false);
         egui::TopBottomPanel::bottom("log")
             .resizable(true)
             .default_height(118.0)
@@ -160,6 +158,7 @@ impl App {
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         clear_log = widgets::link(ui, &p, "Clear").clicked();
+                        copy_log = widgets::link(ui, &p, "Copy log").clicked();
                     });
                 });
                 egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
@@ -171,10 +170,27 @@ impl App {
         if clear_log {
             self.log.clear();
         }
+        if copy_log {
+            ctx.copy_text(self.support_text());
+            self.push_log("Log copied to the clipboard. Paste it into your message.".to_string());
+        }
 
+        let (mut open_update, mut dismiss_update) = (false, false);
         egui::CentralPanel::default()
             .frame(Frame::none().fill(p.bg).inner_margin(Margin::symmetric(36.0, 28.0)))
             .show(ctx, |ui| {
+                if let Some((msg, _)) = &self.update {
+                    widgets::banner(ui, &p, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(widgets::bold(msg.as_str(), 14.0).color(p.tintx));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                open_update = widgets::primary(ui, &p, "Open download page", true, 0.0).clicked();
+                                dismiss_update = widgets::link(ui, &p, "Dismiss").clicked();
+                            });
+                        });
+                    });
+                    ui.add_space(8.0);
+                }
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.tab {
                     Tab::Setup => self.ui_setup(ui),
                     Tab::Images => self.ui_images(ui),
@@ -183,6 +199,15 @@ impl App {
                     Tab::Keymap => self.ui_keymap(ui),
                 });
             });
+
+        if open_update {
+            if let Some((_, url)) = &self.update {
+                ctx.open_url(egui::OpenUrl::new_tab(url.clone()));
+            }
+        }
+        if dismiss_update {
+            self.update = None;
+        }
 
         // Drag & drop: an .apk installs, any other file is queued for "Copy to emulator".
         let dropped: Vec<egui::DroppedFile> = ctx.input(|i| i.raw.dropped_files.clone());
@@ -386,6 +411,17 @@ impl App {
         ui.label(RichText::new(format!("Data folder: {}", paths::home().display())).color(p.mu).small());
         if widgets::link(ui, &p, "Open data folder").clicked() {
             adb::open_folder(&paths::home());
+        }
+        let (mut updates_changed, mut check_now) = (false, false);
+        ui.horizontal(|ui| {
+            updates_changed = ui.checkbox(&mut self.check_updates, "Check for updates when the app starts").changed();
+            check_now = widgets::link(ui, &p, "Check now").clicked();
+        });
+        if updates_changed {
+            crate::settings::save(&crate::settings::Settings { mode: self.mode, updates: self.check_updates });
+        }
+        if check_now {
+            self.start_update_check(true);
         }
     }
 
@@ -952,7 +988,7 @@ fn marker(painter: &egui::Painter, pos: egui::Pos2, label: &str) {
         pos,
         egui::Align2::CENTER_CENTER,
         short,
-        egui::FontId::new(10.5, theme::bold_family()),
+        egui::FontId::new(11.0, theme::bold_family()),
         egui::Color32::from_rgb(0x34, 0x34, 0xC8),
     );
 }
@@ -1009,6 +1045,22 @@ impl App {
 
         let cur_name = self.km.as_ref().map(|prof| prof.name.clone());
         let editing = !enabled;
+
+        // Resize the captured screen to the exact pixels it is shown at (sharper than letting the GPU squash it).
+        {
+            let (dw, dh) = self.km_dev_size.unwrap_or((1080, 1920));
+            let scale = (250.0 / dw as f32).min(400.0 / dh as f32);
+            let ppp = ui.ctx().pixels_per_point();
+            let target = (((dw as f32 * scale) * ppp).round().max(8.0) as u32, ((dh as f32 * scale) * ppp).round().max(8.0) as u32);
+            if let Some((sw, sh, rgba)) = &self.km_src {
+                if self.km_tex.is_none() || self.km_tex_px != target {
+                    let out = crate::image_util::box_resize(rgba, *sw, *sh, target.0 as usize, target.1 as usize);
+                    let img = egui::ColorImage::from_rgba_unmultiplied([target.0 as usize, target.1 as usize], &out);
+                    self.km_tex = Some(ui.ctx().load_texture("device_screen", img, egui::TextureOptions::LINEAR));
+                    self.km_tex_px = target;
+                }
+            }
+        }
 
         ui.horizontal_top(|ui| {
             // ----- left: the phone -----

@@ -73,7 +73,7 @@ fn install_fonts(ctx: &egui::Context) {
     let mut f = FontDefinitions::default();
     f.font_data.insert(
         "jakarta".into(),
-        FontData::from_static(include_bytes!("../assets/fonts/PlusJakartaSans-Regular.ttf")),
+        FontData::from_static(include_bytes!("../assets/fonts/PlusJakartaSans-Medium.ttf")),
     );
     f.font_data.insert(
         "jakarta-bold".into(),
@@ -138,7 +138,7 @@ fn make_style(p: &Pal, dark: bool) -> egui::Style {
     s.text_styles = [
         (TextStyle::Heading, FontId::new(26.0, b.clone())),
         (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
-        (TextStyle::Button, FontId::new(13.5, b)),
+        (TextStyle::Button, FontId::new(14.0, b)),
         (TextStyle::Small, FontId::new(12.0, FontFamily::Proportional)),
         (TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace)),
     ]

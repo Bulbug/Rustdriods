@@ -3,9 +3,12 @@
 
 mod adb;
 mod app;
+mod crash;
 mod icons;
+mod image_util;
 mod settings;
 mod theme;
+mod update;
 mod widgets;
 mod devices;
 mod download;
@@ -25,6 +28,7 @@ mod virt;
 pub type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 fn main() -> eframe::Result<()> {
+    crash::install_hook();
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_icon(app_icon())

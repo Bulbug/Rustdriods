@@ -75,6 +75,7 @@ enum Msg {
     MapReady(Option<MapRuntime>),
     MapToggle(bool),
     PendingStart(String),
+    Update { res: Result<Option<(String, String)>, String>, manual: bool },
 }
 
 /// The emulator that is currently running (only one at a time).
@@ -201,7 +202,9 @@ pub struct App {
     edit_cores: u32,
     edit_preset: Preset,
 
-    logo: Option<egui::TextureHandle>,
+    update: Option<(String, String)>,
+    check_updates: bool,
+    logo: Option<(u32, egui::TextureHandle)>,
     mode: Mode,
     show_new: bool,
     pending_start: Option<String>,
@@ -209,7 +212,9 @@ pub struct App {
     km_profiles: Vec<String>,
     km: Option<Profile>,
     km_new_name: String,
+    km_src: Option<(usize, usize, Vec<u8>)>, // the captured screen, before it is resized for display
     km_tex: Option<egui::TextureHandle>,
+    km_tex_px: (u32, u32),
     km_dev_size: Option<(u32, u32)>,
     km_pending: Option<(f32, f32)>,
     km_runtime: Option<MapRuntime>,
@@ -227,9 +232,53 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let mode = crate::settings::load_mode();
-        theme::install(&cc.egui_ctx, mode);
-        Self::with_context(&cc.egui_ctx, mode, true)
+        let st = crate::settings::load();
+        theme::install(&cc.egui_ctx, st.mode);
+        let mut app = Self::with_context(&cc.egui_ctx, st.mode, true);
+        app.check_updates = st.updates;
+        if st.updates {
+            app.start_update_check(false);
+        }
+        // The last run crashed: put its report in the log so "Copy log" sends it along.
+        if let Some(report) = crate::crash::take_previous() {
+            for line in report.lines() {
+                app.push_log(line.to_string());
+            }
+            app.info = Some(
+                "The app closed unexpectedly last time. The details are in the log below: press \"Copy log\" and send it to the developer."
+                    .to_string(),
+            );
+        }
+        app
+    }
+
+    /// Looks for a newer version in the background. `manual` = the user asked, so always answer.
+    fn start_update_check(&self, manual: bool) {
+        let rep = self.rep.clone();
+        thread::spawn(move || {
+            let res = crate::update::check();
+            rep.send(Msg::Update { res, manual });
+        });
+    }
+
+    /// Everything useful for a bug report: version, PC, setup state, and the log.
+    fn support_text(&self) -> String {
+        let mut t = format!("Android Emulator Manager {}\n", crate::update::version_label());
+        match self.pc_ram_mb {
+            Some(ram) => t += &format!("PC: {:.1} GB RAM, {} threads\n", ram as f64 / 1024.0, self.pc_cores),
+            None => t += &format!("PC: {} threads\n", self.pc_cores),
+        }
+        t += &format!("Graphics: {}\n", if self.gpus.is_empty() { "unknown".to_string() } else { self.gpus.join(", ") });
+        t += &format!("Virtualization: {} ({})\n", if self.virt.0 { "ok" } else { "not ready" }, self.virt.1);
+        t += &format!(
+            "Java: {} | SDK tools: {} | adb: {} | Emulator: {}\n",
+            self.java_ok, self.tools_ok, self.adb_ok, self.emu_ok
+        );
+        let names: Vec<&str> = self.devices.iter().map(|d| d.name.as_str()).collect();
+        t += &format!("Devices: {}\n", if names.is_empty() { "none".to_string() } else { names.join(", ") });
+        t += "\n--- log ---\n";
+        t += &self.log.join("\n");
+        t
     }
 
     /// `refresh` = read the PC state in the background right away (switched off in tests).
@@ -276,18 +325,18 @@ impl App {
             edit_ram: 2048,
             edit_cores: 2,
             edit_preset: Preset::Lite,
-            logo: Some(ctx.load_texture(
-                "app_logo",
-                egui::ColorImage::from_rgba_unmultiplied([128, 128], include_bytes!("../assets/logo-128.rgba")),
-                egui::TextureOptions::LINEAR,
-            )),
+            update: None,
+            check_updates: true,
+            logo: None, // made on the first frame, at the exact size it is shown
             mode,
             show_new: false,
             pending_start: None,
             km_profiles: keymap::list_profiles(),
             km: None,
             km_new_name: String::new(),
+            km_src: None,
             km_tex: None,
+            km_tex_px: (0, 0),
             km_dev_size: None,
             km_pending: None,
             km_runtime: None,
@@ -471,8 +520,8 @@ impl App {
                     }
                 }
                 Msg::Screen(s) => {
-                    let img = egui::ColorImage::from_rgba_unmultiplied([s.sw, s.sh], &s.rgba);
-                    self.km_tex = Some(self.rep.ctx.load_texture("device_screen", img, egui::TextureOptions::LINEAR));
+                    self.km_src = Some((s.sw, s.sh, s.rgba));
+                    self.km_tex = None; // rebuilt at the right size on the next frame
                     self.km_dev_size = Some((s.w, s.h));
                     let landscape = s.w > s.h;
                     if let Some(p) = self.km.as_mut() {
@@ -491,6 +540,20 @@ impl App {
                 }
                 Msg::MapToggle(on) => self.km_active = on,
                 Msg::PendingStart(name) => self.pending_start = Some(name),
+                Msg::Update { res, manual } => match res {
+                    Ok(Some(found)) => self.update = Some(found),
+                    Ok(None) => {
+                        self.update = None;
+                        if manual {
+                            self.info = Some("You're on the latest version.".to_string());
+                        }
+                    }
+                    Err(e) => {
+                        if manual {
+                            self.info = Some(format!("Couldn't check for updates: {e}"));
+                        }
+                    }
+                },
                 Msg::EmuExited { code } => {
                     self.km_runtime = None; // the emulator is gone, so mapping stops too
                     self.km_active = false;
@@ -1083,7 +1146,20 @@ mod tests {
 
     #[test]
     fn version_label_starts_with_v() {
-        assert!(views::version_label().starts_with(&format!("v{}", env!("CARGO_PKG_VERSION"))));
+        assert!(crate::update::version_label().starts_with(&format!("v{}", env!("CARGO_PKG_VERSION"))));
+    }
+
+    #[test]
+    fn support_text_has_the_useful_facts() {
+        let ctx = egui::Context::default();
+        let mut app = App::with_context(&ctx, Mode::Light, false);
+        app.pc_ram_mb = Some(16384);
+        app.gpus = vec!["Test GPU".into()];
+        app.log = vec!["something happened".into()];
+        let t = app.support_text();
+        for part in ["Android Emulator Manager v", "16.0 GB", "Test GPU", "Virtualization", "something happened"] {
+            assert!(t.contains(part), "missing: {part}");
+        }
     }
 
     #[test]
@@ -1140,8 +1216,9 @@ mod tests {
             app.progress = Some(0.4);
             app.confirm = Some(("Are you sure?".into(), Action::Setup));
             app.info = Some("Hello".into());
-            let img = egui::ColorImage::new([4, 4], egui::Color32::from_rgb(90, 90, 240));
-            app.km_tex = Some(ctx.load_texture("test_screen", img, egui::TextureOptions::LINEAR));
+            // the same path real captures take: keep the pixels, let the page resize them
+            app.km_tex = None;
+            app.km_src = Some((4, 4, vec![200u8; 4 * 4 * 4]));
             app.km_pending = Some((0.4, 0.6));
             for (size, extra) in [((1080, 1920), 0), ((1920, 1080), 1)] {
                 app.km_dev_size = Some(size);

@@ -65,6 +65,14 @@ What matters most, in order:
 - Some games detect or ignore injected input.
 - Profiles are small text files in `%LOCALAPPDATA%\AndroidEmulatorManager\keymaps`.
 
+## If something goes wrong
+- Press **Copy log** in the log bar at the bottom and paste it into your bug report. It includes your version, PC details, and what is installed, but nothing personal.
+- If the app crashes, it saves a report and shows it in the log the next time you open it.
+
+## Updates and privacy
+When the app starts it asks GitHub (`api.github.com`) once whether a newer version exists. Nothing about you or your PC is sent.
+Turn it off on the Setup page ("Check for updates when the app starts"). Builds you make yourself don't check at all.
+
 ## Where things are stored
 Everything lives in `%LOCALAPPDATA%\AndroidEmulatorManager` (the Setup tab has an "Open data folder" button):
 `sdk\` (SDK tools, images, emulator), `avd\` (your devices), `jre\` (only if Java was downloaded).

@@ -17,7 +17,7 @@ fn pad(w: f32) -> egui::Vec2 {
 
 /// Filled accent button. `w` = minimum width (0 = fit the text).
 pub fn primary(ui: &mut Ui, p: &Pal, text: &str, enabled: bool, w: f32) -> Response {
-    let b = Button::new(bold(text, 13.5).color(p.on))
+    let b = Button::new(bold(text, 14.0).color(p.on))
         .fill(p.ac)
         .stroke(Stroke::NONE)
         .rounding(12.0)
@@ -27,7 +27,7 @@ pub fn primary(ui: &mut Ui, p: &Pal, text: &str, enabled: bool, w: f32) -> Respo
 
 /// Outlined button.
 pub fn ghost(ui: &mut Ui, p: &Pal, text: &str, enabled: bool, w: f32) -> Response {
-    let b = Button::new(bold(text, 13.5).color(p.tx))
+    let b = Button::new(bold(text, 14.0).color(p.tx))
         .fill(Color32::TRANSPARENT)
         .stroke(Stroke::new(1.0_f32, p.ln2))
         .rounding(12.0)
@@ -37,7 +37,7 @@ pub fn ghost(ui: &mut Ui, p: &Pal, text: &str, enabled: bool, w: f32) -> Respons
 
 /// Outlined red button (Stop, Delete).
 pub fn danger(ui: &mut Ui, p: &Pal, text: &str, enabled: bool, w: f32) -> Response {
-    let b = Button::new(bold(text, 13.5).color(p.dg))
+    let b = Button::new(bold(text, 14.0).color(p.dg))
         .fill(Color32::TRANSPARENT)
         .stroke(Stroke::new(1.0_f32, p.dgb))
         .rounding(12.0)
@@ -119,7 +119,7 @@ pub fn stat(ui: &mut Ui, p: &Pal, big: &str, label: &str) {
     panel(ui, p, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
         ui.label(bold(big, 28.0));
-        ui.label(RichText::new(label).color(p.mu).font(FontId::new(12.5, bold_family())));
+        ui.label(RichText::new(label).color(p.mu).font(FontId::new(13.0, bold_family())));
     });
 }
 
@@ -207,7 +207,7 @@ pub fn drop_zone(ui: &mut Ui, p: &Pal, title: &str, sub: &str) {
         pos2(rect.center().x, rect.center().y + 12.0),
         egui::Align2::CENTER_CENTER,
         sub,
-        FontId::new(12.5, egui::FontFamily::Proportional),
+        FontId::new(13.0, egui::FontFamily::Proportional),
         p.mu,
     );
 }
