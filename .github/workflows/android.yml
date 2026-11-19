@@ -1,0 +1,62 @@
+name: Android
+on:
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:   # also lets you press "Run workflow" by hand
+
+permissions:
+  contents: write
+
+# If you push twice quickly, only the newest build is published.
+concurrency:
+  group: android-beta
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build the APK
+        working-directory: android
+        run: gradle --no-daemon assembleRelease
+
+      - name: Name the files
+        run: |
+          mkdir -p out
+          cp android/app/build/outputs/apk/release/app-release.apk out/rustdroids-dual-space-beta.apk
+          (cd out && sha256sum rustdroids-dual-space-beta.apk > SHA256SUMS-android.txt)
+          ls -l out
+
+      # Always keep the files on the run page, even if publishing the release fails.
+      - name: Keep the files (run page, under "Artifacts")
+        uses: actions/upload-artifact@v4
+        with:
+          name: dual-space-apk
+          path: out/*
+          if-no-files-found: error
+
+      # Replaces the previous release (and moves the "dual-space-beta" tag to this commit).
+      - name: Publish the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHORT="${GITHUB_SHA::7}"
+          gh release delete dual-space-beta --cleanup-tag --yes || true
+          gh release create dual-space-beta out/rustdroids-dual-space-beta.apk out/SHA256SUMS-android.txt \
+            --prerelease --target "$GITHUB_SHA" \
+            --title "Dual Space for Android (beta, latest build)" \
+            --notes "Automatic beta build of the Dual Space Android app. Commit: $SHORT. Needs Android 9 or newer. Allow 'Install unknown apps' to install it. Not final: expect bugs. This release is replaced on every change to the android folder."

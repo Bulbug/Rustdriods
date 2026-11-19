@@ -4,6 +4,8 @@ on:
     branches: [main]
     paths-ignore:
       - "**.md"
+      - "android/**"
+      - ".github/workflows/android.yml"
   workflow_dispatch:   # also lets you press "Run workflow" by hand
 
 permissions:
